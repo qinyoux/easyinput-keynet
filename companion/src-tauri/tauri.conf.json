@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EasyInput Companion",
+  "version": "0.1.0",
+  "identifier": "com.easyinput.companion",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "EasyInput Companion · 智能家居中控",
+        "width": 960,
+        "height": 760,
+        "resizable": true,
+        "minWidth": 720,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "copyright": "Copyright (c) 2026 easyinput-keynet",
+    "category": "Utility",
+    "shortDescription": "EasyInput Companion · 智能物联网中控（第8课大作业）",
+    "longDescription": "EasyInput Companion 是「EasyInput 开发板 + PC + ART-Pi」智能物联网中控平台的 PC 侧应用：零固件改动复用 EasyInput HID 0x11 Host Action 通道，把 8 键 × 8 场景映射为 V2.3 统一帧，经 UDP :17335 控制 ART-Pi 智能家居执行端。"
+  }
+}

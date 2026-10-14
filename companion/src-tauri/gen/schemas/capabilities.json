@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"EasyInput Companion 默认权限：核心事件与窗口能力。MVP 不需要文件系统/网络特殊权限（UDP 由 Rust 侧 std::net 直接完成）。","local":true,"windows":["main"],"permissions":["core:default"]}}

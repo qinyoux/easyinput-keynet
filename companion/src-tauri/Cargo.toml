@@ -1,0 +1,79 @@
+[package]
+name = "easyinput-companion"
+version = "0.1.0"
+description = "EasyInput Companion：EasyInput 开发板 × PC × ART-Pi 智能家居中控（第8课大作业 · 方案D MVP）"
+authors = ["easyinput-keynet"]
+edition = "2021"
+
+[lib]
+name = "companion_lib"
+# 只留 rlib —— 复刻 easyop 2026-09-22 实测决定：staticlib / cdylib 服务的是移动端，
+# 本项目只出 Windows 桌面版，多出的两项每轮编译白写约 1.1GB 的 .lib。
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# ⚠️ 这不是功能依赖，是**编译期修复**，不要删（与 easyop 同坑，2026-10-14 复现验证）。
+#
+# 问题链（rustc 1.98）：build-dep `tauri-build` → `tauri-utils` → `schemars 0.8.22`
+# → `indexmap 1.9.3`。indexmap 1.9 的 `IndexMap<K, V, S = RandomState>` 只在
+# `has_std` 生效时才给 S 默认值；而 `has_std` 由其 build.rs 用 autocfg 探测
+# sysroot 得出，rustc 1.98 上探测不到 ⇒ schemars 的
+# `pub type Map<K, V> = indexmap::IndexMap<K, V>` 报
+# "struct takes 3 generic arguments but 2 were supplied"，整个项目 check 都过不去。
+#
+# 解法：显式开 std 跳过探测。⚠️ 必须挂在 `[build-dependencies]`、不能挂
+# `[dependencies]`（schemars 在宿主图，resolver v2 不跨图合并特性）。
+indexmap = { version = "1.9", features = ["std"] }
+
+# ============================================================================
+[features] # Tauri 官方模板标准项，**不要删**
+# ============================================================================
+# `custom-protocol`：开启则把 frontendDist（../dist）内嵌进 exe，用自定义协议
+# tauri:// 读；关闭则退回 dev 模式去 devUrl 拉页面。
+# 2026-10-14 实测踩坑（easyop）：手工 `cargo build --release` 不带这个 feature
+# 出包，双击就是 "localhost 拒绝连接"（devUrl 没服务器）。
+# ⇒ **出包必须走 Tauri CLI，或手工补 `--features custom-protocol`**。
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    # ⚠️ CreateFileW / CreateEventW 在 windows 0.58 里被 "Win32_Security" 门控
+    # （lpSecurityAttributes 参数类型来自 Security 模块）——漏掉这个特性就是
+    # "unresolved import"，easyop 的特性清单里有，别精简掉。
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_DeviceAndDriverInstallation",
+] }
+
+# ============================================================================
+# [patch] tao：修一个上游未修的 UB（复刻 easyop vendor 补丁，2026-10-14）
+# ============================================================================
+#
+# 症状：多线程并发 clone/drop `AppHandle` 时进程无业务报错直接闪退
+# （退出码 0xc0000409，WER 记为 BEX64），日志只有一行
+# `unsafe precondition(s) violated: hint::assert_unchecked ...`。
+#
+# 根因：tao 的 Windows 事件循环 runner 是 `Rc<EventLoopRunner<T>>`（计数非原子），
+# 经 Tauri 一路走到 `AppHandle::clone()`。AppHandle 是 Send+Sync+Clone，
+# 官方推荐用法就是"进线程前先 clone 一个" ⇒ 并发读改写同一个非原子计数，
+# 计数被写坏到 0，下一次 `Rc::clone` 命中 `assert_unchecked(strong != 0)`
+# ⇒ panic_nounwind ⇒ 直接 abort。
+#
+# 补丁内容（vendor/tao 0.37.1 内，均带 `[companion patch 2026-10-14]` 标记）：
+#   src/platform_impl/windows/event_loop/runner.rs : Rc<...> -> Arc<...>
+#   src/platform_impl/windows/event_loop.rs        : Rc::new(...) -> Arc::new(...)
+# 自动 trait 不变：`EventLoopRunner<T>` 内部是 Cell/RefCell，本来就
+# !Send + !Sync，Arc 化只把计数改原子，不改任何行为。
+#
+# ⚠️ 何时可删：tao 上游把 EventLoopRunnerShared 改成 Arc/原子计数之后。
+# 删法：删本节 + `rm -rf vendor/tao`，重跑并发 clone 压测确认。
+[patch.crates-io]
+tao = { path = "vendor/tao" }

@@ -1,0 +1,19 @@
+# Build artifacts
+companion/src-tauri/target/
+companion/node_modules/
+companion/dist/
+
+# WorkBuddy local data (not part of the public repo)
+.workbuddy/
+
+# Cargo local markers
+.cargo-ok
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / temp
+*.log
+nohup.out

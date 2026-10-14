@@ -1,0 +1,98 @@
+{
+  "artpi_ip": "192.168.1.10",
+  "artpi_port": 17335,
+  "scene_mode": "expand",
+  "bindings": [
+    { "uuid": "00000000-0000-4000-8000-000000000101", "kind": "scene", "scene": 1 },
+    { "uuid": "00000000-0000-4000-8000-000000000104", "kind": "scene", "scene": 4 },
+    { "uuid": "00000000-0000-4000-8000-000000000201", "kind": "device_toggle", "device": 1 },
+    { "uuid": "00000000-0000-4000-8000-000000000202", "kind": "device_toggle", "device": 2 },
+    { "uuid": "00000000-0000-4000-8000-000000000203", "kind": "device_toggle", "device": 3 },
+    { "uuid": "00000000-0000-4000-8000-000000000204", "kind": "device_toggle", "device": 4 },
+    { "uuid": "00000000-0000-4000-8000-000000000205", "kind": "device_toggle", "device": 5 },
+    { "uuid": "00000000-0000-4000-8000-000000000206", "kind": "device_toggle", "device": 6 },
+    { "uuid": "00000000-0000-4000-8000-000000000301", "kind": "encoder_left" },
+    { "uuid": "00000000-0000-4000-8000-000000000302", "kind": "encoder_right" },
+    { "uuid": "00000000-0000-4000-8000-000000000303", "kind": "encoder_press" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "回家",
+      "commands": [
+        { "op": "light_on_off", "dev": 1, "on": true },
+        { "op": "light_level", "dev": 1, "level": 80 },
+        { "op": "thermo_target", "zone": 4, "temp_x10": 240 },
+        { "op": "thermo_mode", "zone": 4, "mode": 3 }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "离家",
+      "commands": [
+        { "op": "light_on_off", "dev": 1, "on": false },
+        { "op": "light_on_off", "dev": 2, "on": false },
+        { "op": "fan_on_off", "dev": 3, "on": false },
+        { "op": "socket_on_off", "dev": 5, "on": false },
+        { "op": "socket_on_off", "dev": 6, "on": false },
+        { "op": "thermo_mode", "zone": 4, "mode": 0 }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "睡眠",
+      "commands": [
+        { "op": "light_on_off", "dev": 1, "on": false },
+        { "op": "light_level", "dev": 1, "level": 0 },
+        { "op": "thermo_target", "zone": 4, "temp_x10": 260 }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "影院",
+      "commands": [
+        { "op": "light_level", "dev": 1, "level": 30 },
+        { "op": "socket_on_off", "dev": 5, "on": true }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "阅读",
+      "commands": [
+        { "op": "light_level", "dev": 1, "level": 100 },
+        { "op": "light_level", "dev": 2, "level": 50 }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "全开",
+      "commands": [
+        { "op": "light_on_off", "dev": 1, "on": true },
+        { "op": "light_level", "dev": 1, "level": 100 },
+        { "op": "light_on_off", "dev": 2, "on": true },
+        { "op": "light_level", "dev": 2, "level": 100 }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "全关",
+      "commands": [
+        { "op": "light_on_off", "dev": 1, "on": false },
+        { "op": "light_on_off", "dev": 2, "on": false },
+        { "op": "fan_on_off", "dev": 3, "on": false },
+        { "op": "socket_on_off", "dev": 5, "on": false },
+        { "op": "socket_on_off", "dev": 6, "on": false }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "预冷",
+      "commands": [
+        { "op": "thermo_target", "zone": 4, "temp_x10": 220 },
+        { "op": "thermo_mode", "zone": 4, "mode": 1 },
+        { "op": "fan_on_off", "dev": 3, "on": true },
+        { "op": "fan_level", "dev": 3, "level": 60 }
+      ]
+    }
+  ]
+}
