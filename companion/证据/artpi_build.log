@@ -12,7 +12,7 @@ LINK rt-thread.elf
 arm-none-eabi-objcopy -O binary rt-thread.elf rtthread.bin
 arm-none-eabi-size rt-thread.elf
    text	   data	    bss	    dec	    hex	filename
- 429004	   2404	  61644	 493052	  785fc	rt-thread.elf
+ 431128	   2404	  61644	 495176	  78e48	rt-thread.elf
 scons: done building targets.
 TypeError: _safe_remove() takes 1 positional argument but 2 were given:
   File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1381:
@@ -31,7 +31,7 @@ TypeError: _safe_remove() takes 1 positional argument but 2 were given:
     syncmethod()
   File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 161:
     self._os_unlink(self._file_name)
-Exception ignored in: <function dblite.__del__ at 0x000002828E709DA0>
+Exception ignored in: <function dblite.__del__ at 0x0000023076699DA0>
 Traceback (most recent call last):
   File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 143, in __del__
   File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 140, in close
