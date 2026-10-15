@@ -17,3 +17,7 @@ desktop.ini
 # Logs / temp
 *.log
 nohup.out
+
+# Feishu doc authoring workspace + personal corpus (not part of the public repo)
+draft_*/
+style_ref.md
