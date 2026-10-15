@@ -1,9 +1,14 @@
 [package]
 name = "easyinput-companion"
-version = "0.1.0"
+version = "0.2.0"
 description = "EasyInput Companion：EasyInput 开发板 × PC × ART-Pi 智能家居中控（第8课大作业 · 方案D MVP）"
 authors = ["easyinput-keynet"]
 edition = "2021"
+# `cargo run` 需要它才能确定跑哪个 bin——工程有两个 bin：
+#   easyinput-companion（主程序，Tauri 应用）/ hid-probe（HID 调试工具）。
+# 少了这一行，`cargo run` 会报 "could not determine which binary to run"，
+# 直接打断 `npm run tauri dev`。新增 bin 时这里必须同步复核。
+default-run = "easyinput-companion"
 
 [lib]
 name = "companion_lib"

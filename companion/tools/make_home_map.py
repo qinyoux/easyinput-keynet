@@ -27,6 +27,39 @@ HOME_MAP = Path(
 
 SCENE_LABELS = ["回家", "离家", "睡眠", "影院", "阅读", "全开", "全关", "预冷"]
 
+# Companion 工程根目录
+COMPANION_ROOT = Path(r"E:\MY_AI\trae\ESP32_S3_BOT\easyinput-keynet\companion")
+# `export-scenes` 是 Rust 真源导出器：`SceneCmd` 是带
+# `#[serde(tag="op", rename_all="snake_case")]` 的枚举，手写必然对不上
+# （实际踩过：我写了 `device_on` / `set_temp`，真值是 `light_on_off` /
+# `thermo_target`）。对不上 ⇒ serde 整份 HomeMap 解析失败 ⇒ `load()`
+# 静默回退内置默认 ⇒ artpi_ip 变回 192.168.1.10 ⇒ 帧发给空气，
+# 日志里只有一行 warn。**scenes 永远从 Rust 导出，不手写。**
+EXPORT_SCENES = COMPANION_ROOT / "src-tauri" / "target" / "debug" / "export-scenes.exe"
+
+
+def load_scenes_from_rust() -> list:
+    """调 `export-scenes` 拿内置场景真源；拿不到就明确失败，不猜。"""
+    if not EXPORT_SCENES.exists():
+        sys.exit(
+            f"找不到 {EXPORT_SCENES}\n"
+            f"先跑：cd {COMPANION_ROOT / 'src-tauri'} && cargo build --bin export-scenes"
+        )
+    import subprocess
+
+    out = subprocess.run(
+        [str(EXPORT_SCENES)], capture_output=True, text=True, encoding="utf-8"
+    )
+    if out.returncode != 0:
+        sys.exit(f"export-scenes 失败：{out.stderr}")
+    try:
+        scenes = json.loads(out.stdout)
+    except json.JSONDecodeError as e:
+        sys.exit(f"export-scenes 输出不是合法 JSON：{e}\n前200 字：{out.stdout[:200]}")
+    if len(scenes) != 8:
+        sys.exit(f"内置场景数 {len(scenes)} != 8 —— Rust 侧变了？")
+    return scenes
+
 
 def extract() -> tuple[list[str], dict[str, str]]:
     src = COMPANION_CONSTANTS.read_text(encoding="utf-8")
@@ -54,24 +87,12 @@ def main() -> None:
     bindings.append({"uuid": encoder["right"], "kind": "encoder_right"})
     bindings.append({"uuid": encoder["press"], "kind": "encoder_press"})
 
-    # 场景机内容沿用 Companion 内置的 8 场景默认（home/scene.rs::default_scenes），
-    # 这里只做透传，让配置文件自解释——改场景行为请改 Rust 侧，那是唯一真源。
-    default_scenes = [
-        {"scene": 1, "label": "回家", "ops": [{"op": "device_on", "device": 1, "level": 80},
-                                              {"op": "set_temp", "celsius": 24}]},
-        {"scene": 2, "label": "离家", "ops": [{"op": "all_off"}]},
-        {"scene": 3, "label": "睡眠", "ops": [{"op": "device_on", "device": 1, "level": 20},
-                                              {"op": "device_off", "device": 3},
-                                              {"op": "set_temp", "celsius": 26}]},
-        {"scene": 4, "label": "影院", "ops": [{"op": "device_on", "device": 1, "level": 30},
-                                              {"op": "device_on", "device": 3, "level": 40}]},
-        {"scene": 5, "label": "阅读", "ops": [{"op": "device_on", "device": 1, "level": 90},
-                                              {"op": "set_temp", "celsius": 23}]},
-        {"scene": 6, "label": "全开", "ops": [{"op": "all_on"}]},
-        {"scene": 7, "label": "全关", "ops": [{"op": "all_off"}]},
-        {"scene": 8, "label": "预冷", "ops": [{"op": "set_temp", "celsius": 20},
-                                              {"op": "device_on", "device": 3, "level": 60}]},
-    ]
+    # scenes 来自 Rust 真源（export-scenes），不手写——理由见 load_scenes_from_rust 注释
+    default_scenes = load_scenes_from_rust()
+    print("\n内置场景（Rust 真源导出）：")
+    for s in default_scenes:
+        ops = [c["op"] for c in s["commands"]]
+        print(f"  {s['id']} {s['name']}: {', '.join(ops)}")
 
     cfg = {
         "artpi_ip": "127.0.0.1",

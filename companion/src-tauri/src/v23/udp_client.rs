@@ -119,6 +119,9 @@ impl RetransmitQueue {
 }
 
 /// 链路一次 `pump` 产生的事件（由调用方转成日志 / 前端事件 / 状态更新）。
+///
+/// `Debug` 是测试断言的硬需求（失败时要打出事件列表），不是可选的。
+#[derive(Debug)]
 pub enum LinkEvent {
     Log(String),
     /// 命令被 ART-Pi 确认。
@@ -280,7 +283,17 @@ impl UdpLink {
                     ))),
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            // ⚠️ **Windows 上读超时的 ErrorKind 是 `TimedOut`，不是 `WouldBlock`**。
+            // 2026-10-15 实测踩过：`set_read_timeout(50ms)` 到期后 `recv_from`
+            // 返回 `WSAETIMEDOUT (10060)`，`ErrorKind::WouldBlock` 判据落空，
+            // 于是走else 分支每 50ms 往事件队列塞一条错误日志——UI 日志面板
+            // 每秒被刷掉 20 条「UDP 接收错误」，真故障信息全被埋掉。
+            //
+            // 两个 kind 都当作「本轮没等到包」，安静返回：读超时是 50ms 轮询的
+            // **正常**结果，不是错误。
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => events.push(LinkEvent::Log(format!("UDP 接收错误: {e}"))),
         }
     }
@@ -539,5 +552,46 @@ mod tests {
         // 非整数倍尾部被忽略（容错，不 panic）。
         let states = parse_status_payload(&[1, 1, 80]);
         assert!(states.is_empty());
+    }
+
+    /// Windows 读超时是 `TimedOut`（WSAETIMEDOUT 10060）而不是 `WouldBlock`。
+    ///
+    /// 这不是"顺手补的"：判据写错时，50ms 轮询每轮都产出一条错误日志，
+    /// UI 日志面板每秒被刷掉 20 条，真故障信息全被埋。
+    #[test]
+    fn read_timeout_is_not_treated_as_error() {
+        // 一个没人监听的地址：构造链路后在50ms 内必然收不到包。
+        let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut link = UdpLink::new(peer).expect("绑定本机随机端口应成功");
+
+        let mut events = Vec::new();
+        link.recv_once(&mut events, Duration::from_millis(50));
+
+        // 关键：超时不得产生任何事件（尤其不得是 Log）。
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Log(m) if m.contains("接收错误"))),
+            "读超时被当成错误上报了：{events:?}"
+        );
+        assert!(
+            events.is_empty(),
+            "读超时应安静返回，实际产出：{events:?}"
+        );
+    }
+
+    /// 超时安静返回的前提：别把它误改成"吞掉一切"。
+    #[test]
+    fn recv_once_ignores_unrelated_timeout_but_frame_still_parses() {
+        let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut link = UdpLink::new(peer).expect("绑定应成功");
+
+        // 对端不存在 ⇒ 可能收到 ICMP 不可达，也可能是纯超时；
+        // 两种都不该panic，且 last_rx 不应被更新。
+        for _ in 0..3 {
+            let mut events = Vec::new();
+            link.recv_once(&mut events, Duration::from_millis(20));
+        }
+        assert!(link.last_rx.is_none(), "无对端时不得更新 last_rx");
     }
 }
