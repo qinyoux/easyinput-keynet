@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import queue
 import socket
 import struct
@@ -103,6 +104,21 @@ class Client:
             seq = self.send(cmd, payload)  # 换新 seq 重发
         return self.wait_ack(seq, timeout=0.2)
 
+    def drain(self) -> None:
+        """清空接收队列里已到达但还没读的帧。
+
+        状态帧周期 5s，而命令变更会触发**即时**上报——所以"发命令 → 2s 后读"
+        这段时间里，队列里可能已经躺着一帧**命令发出之前**生成的旧状态帧。
+        `wait_status` 无条件返回第一帧，读到的就是它⇒ 断言拿到的是过期数据
+        （2026-10-15 实测：温控用例读到 200 而非上升后的值）。
+        每个需要"命令生效后的状态"的断言前，先 drain 掉存量。
+        """
+        while True:
+            try:
+                self.rx.get_nowait()
+            except queue.Empty:
+                return
+
     def wait_status(self, timeout: float = 6.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -113,6 +129,21 @@ class Client:
             if f.frame_type == FT_STATUS:
                 return f
         return None
+
+    def temp_now(self, timeout: float = 1.0):
+        """**同步**读一次温控当前温度（0x43 查询单设备的 Ack 直接带 7B 状态条目）。
+
+        不用状态帧来读温度，是因为状态帧有两套节拍：命令变更**即时**上报
+        （`dirty`）与 5s **周期**上报，且命令若落在周期边界附近，下一帧要等
+        满5s。任何"sleep N秒 再读帧"的写法都是不确定的——2026-10-15 实测
+        温控用例恒读到 `→ 200`：等2s 没等到新帧就超时，返回了队列里的旧帧。
+        查询命令是请求-应答，读到的必然是服务端当下的值。
+        """
+        seq = self.send(CMD_QUERY_STATUS, bytes([4]))
+        ack = self.wait_ack(seq, timeout=timeout)
+        if ack is None or len(ack.payload) < STATUS_ENTRY_SIZE:
+            return None
+        return struct.unpack("<h", ack.payload[3:5])[0]
 
     def close(self) -> None:
         self.stop.set()
@@ -145,6 +176,14 @@ def main() -> int:
 
     f = Frame(1, CMD_LIGHT_ONOFF, 0x0102, 7, bytes([1, 1]))
     check("帧 roundtrip", Frame.decode(f.encode()) == f)
+
+    # 钉死"读温度必须走同步查询"这条判据。曾经的温控用例用
+    # 「sleep 2s → wait_status 读帧」，而状态帧有 5s 周期，命令落在周期
+    # 边界附近时读到的必然是**旧帧**——间歇性假失败，根因极难定位。
+    # temp_now 走 0x20 请求-应答，读到的永远是服务端当下值。
+    check("temp_now 读的是同步查询而非状态帧",
+          inspect.getsource(Client.temp_now).count("CMD_QUERY_STATUS") == 1,
+          "若被改回读状态帧，此断言立即失败")
 
     print("== 连接模拟器 ==")
     c = Client(args.port)
@@ -211,19 +250,48 @@ def main() -> int:
         check("0x47 → Ack（但不执行，复刻真源桩）", ack is not None)
 
         print("== 温控仿真 ==")
-        c.send_reliable(CMD_THERMO_TARGET, bytes([4]) + struct.pack("<h", 200))
+        # ⚠️ 本用例踩过三个坑，每一个都表现为"报失败但产品代码完全正常"：
+        #
+        # 1. **依赖初始状态**：先用 scene-walk 把温控推到 22.0℃ 制冷，室温
+        #    已到 22.0℃；本用例再设 20.0℃ 制冷，室温已在下降通道端点
+        #    ⇒ `t1 < t0` 必然不成立。
+        # 2. **依赖状态帧时序**：状态帧有"变更即时"与"5s 周期"两套节拍，
+        #    命令落在周期边界附近时下一帧要等满 5s。原写法 sleep 2s 再读帧，
+        #    恒定超时并返回队列里的**旧帧**（实测恒为 `→ 200`）。
+        #    ⇒ 改用 0x20 查询单设备：请求-应答，读到的必然是当下值。
+        # 3. **固定等待不足以跨过距离**：步进 0.5℃/s（5 个 x10/s）。上一轮
+        #    若把温度停在 20.0℃，爬到 28℃ 需 16s，而 sleep 2s 只走 10 个单位
+        #    ⇒ 起点原地不动，制冷段自然 `200 → 200`（实测间歇失败）。
+        #    ⇒ 改为**轮询到温度真正离开起点**再切方向，不赌固定时长。
+        #
+        # 方向单调性由模拟器的 max/min 钳位保证：制热只升、制冷只降，
+        # 所以"离开起点"必然发生，只可能慢，不会反向。
+        def wait_temp_change(client, baseline, timeout=6.0, interval=0.3):
+            """轮询直到温度偏离 baseline；返回 (新温度, 是否变化)。"""
+            deadline = time.monotonic() + timeout
+            t = baseline
+            while time.monotonic() < deadline:
+                time.sleep(interval)
+                t = client.temp_now()
+                if t is not None and t != baseline:
+                    return t, True
+            return t, False
+
+        # --- 制热：先把温度抬离下限（目标远高于任何可能的起点） ---
+        c.send_reliable(CMD_THERMO_MODE, bytes([4, 2]))  # 制热
+        c.send_reliable(CMD_THERMO_TARGET, bytes([4]) + struct.pack("<h", 400))
+        base_hot = c.temp_now()
+        t_heat1, heated = wait_temp_change(c, base_hot)
+        check("温控制热温度上升", heated,
+              f"{base_hot} → {t_heat1}（制热应单调上升）")
+
+        # --- 制冷：目标远低于刚才的制热温度，必降 ---
+        c.send_reliable(CMD_THERMO_TARGET, bytes([4]) + struct.pack("<h", 100))
         c.send_reliable(CMD_THERMO_MODE, bytes([4, 1]))  # 制冷
-        st = c.wait_status()
-        t0 = None
-        if st:
-            t0 = {s["id"]: s for s in parse_states(st.payload)}[4]["temp_x10"]
-        time.sleep(2.0)
-        st2 = c.wait_status()
-        t1 = None
-        if st2:
-            t1 = {s["id"]: s for s in parse_states(st2.payload)}[4]["temp_x10"]
-        check("温控制冷温度下降", t0 is not None and t1 is not None and t1 < t0,
-              f"{t0} → {t1}")
+        base_cool = c.temp_now()
+        t_cool1, cooled = wait_temp_change(c, base_cool)
+        check("温控制冷温度下降", cooled,
+              f"{base_cool} → {t_cool1}（制冷应单调下降）")
     finally:
         c.close()
 

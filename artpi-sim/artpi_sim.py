@@ -370,11 +370,25 @@ class ArtPiSim:
 # ---------------------------------------------------------------------------
 
 _START = time.monotonic()
+_LOG_FH = None  # --log 指定的日志文件句柄（未指定则只打屏幕）
+
+
+def set_log_file(path: str) -> None:
+    """打开日志文件。
+
+    屏幕上的日志会随终端关闭而消失，但演示视频重录、作业文档贴证据
+    都需要可归档的文本，所以每行同时写一份到文件。
+    """
+    global _LOG_FH
+    _LOG_FH = open(path, "a", encoding="utf-8", buffering=1)
 
 
 def log(msg: str) -> None:
     t = time.monotonic() - _START
-    print(f"[{t:7.1f}s] {msg}", flush=True)
+    line = f"[{t:7.1f}s] {msg}"
+    print(line, flush=True)
+    if _LOG_FH is not None:
+        _LOG_FH.write(line + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +455,13 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=17335)
     ap.add_argument("--room-temp", type=int, default=240,
                     help="initial room temperature x10 (240 = 24.0C)")
+    ap.add_argument("--log", default=None,
+                    help="同时把日志写入该文件（追加模式），用于留证")
     args = ap.parse_args()
+
+    if args.log:
+        set_log_file(args.log)
+        log(f"日志文件: {args.log}")
     serve(args.port, args.room_temp)
 
 

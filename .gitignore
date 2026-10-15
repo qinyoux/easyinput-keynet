@@ -18,6 +18,10 @@ desktop.ini
 *.log
 nohup.out
 
+# 例外：证据目录是对外交付物，CHANGELOG / README / 演示脚本.md 都引用了它，
+# 别人克隆后必须能看到。内容仅为 127.0.0.1 环回，无敏感信息。
+!companion/证据/*.log
+
 # Feishu doc authoring workspace + personal corpus (not part of the public repo)
 draft_*/
 style_ref.md
