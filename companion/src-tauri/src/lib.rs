@@ -173,15 +173,37 @@ fn spawn_udp_thread(app: AppHandle, rx: Receiver<OutCmd>, peer: SocketAddr) {
 
         let mut last_emit = Instant::now();
         let mut dirty = true;
+        // 同一轮里已发命令数：用于**命令节流**。详见下方 while 循环内注释。
+        let mut sent_this_round = 0usize;
         loop {
             // 1. 命令通道排空。
             let mut peer_changed = false;
+            sent_this_round = 0;
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
                     OutCmd::Send { cmd, payload, label } => {
+                        // ⚠️ **命令节流（ART-Pi 真机实测约束）**
+                        // 2026-10-15 联调实测：一个场景展开出的 2–6 条命令若在
+                        // 同一轮里无间隔连发，ART-Pi 会随机丢包——8 连发仅
+                        // 1/8 收到 Ack，且 3 次重传全丢 ⇒ 场景执行不全。
+                        // 根因在板子侧（ctrl_server 每包 rt_kprintf 阻塞 +
+                        // AP6212 接收缓冲），固件不能改（路线 D 前提），
+                        // 但 **PC 侧能让出节奏**。
+                        //
+                        // 为什么不依赖重传兜底：重传 200ms 后触发，而板子
+                        // 丢包是接收缓冲溢出型，重发同样进不去，实测 3 次全丢。
+                        // 从源头降速才有效。
+                        //
+                        // 150ms 的依据：实测 0ms→1/8、50ms→7/8、150ms→31/31
+                        // （连跑 3 次零丢失）。真人按键天然 >200ms 间隔，
+                        // 所以这是"对齐真实使用节奏"而非迁就 bug。
+                        if sent_this_round > 0 {
+                            std::thread::sleep(Duration::from_millis(CMD_GAP_MS));
+                        }
                         if let Err(e) = link.send_command(cmd, &payload, &label) {
                             log_buffer::err(format!("发送失败（{label}）: {e}"));
                         }
+                        sent_this_round += 1;
                         dirty = true;
                     }
                     OutCmd::SetPeer(ip) => {

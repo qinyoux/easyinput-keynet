@@ -18,13 +18,17 @@
 //! # 用法
 //!
 //! ```text
-//! cargo run --bin scene-walk                # 打 127.0.0.1:17335（模拟器）
-//! cargo run --bin scene-walk -- 192.168.1.10# 打 ART-Pi 真机
-//! cargo run --bin scene-walk -- 127.0.0.1 17335 900
+//! cargo run --bin scene-walk                          # 打 127.0.0.1:17335（模拟器）
+//! cargo run --bin scene-walk -- 10.10.21.29          # 打 ART-Pi 真机
+//! cargo run --bin scene-walk -- 10.10.21.29 17335 1.2 150
 //! ```
 //!
-//! 第四个参数是场景间隔秒数（默认 1.2s）：给状态帧留出回传时间，
-//! 让日志里"命令 → Ack → 状态"三行成组出现，便于肉眼核对。
+//! 参数：`<ip> <port> <场景间隔s> <命令间隔ms> <配置目录>`
+//! - 场景间隔默认 1.2s：给状态帧留出回传时间，让日志里"命令 → Ack → 状态"成组
+//! - **命令间隔默认 150ms**：同一场景展开出的多条命令之间要留间隔。
+//!   ART-Pi 真机实测无间隔连发会随机丢 Ack（8 连发仅 1/8 收到），
+//!   且重传救不回来 ⇒ 场景执行不全。真人按键天然 >200ms 间隔，
+//!   所以这是对齐真实节奏，不是迁就 bug。
 //!
 //! 退出码：0 = 8 个场景全部收到 Ack；1 = 有场景未确认（详见结尾汇总）。
 
@@ -59,15 +63,19 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(ART_PI_PORT);
     let gap_s: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.2);
+    // 同一场景内多条命令的间隔（ms）。ART-Pi 真机实测：无间隔连发会随机
+    // 丢 Ack（8 连发仅 1/8），150ms 可稳。默认 150。
+    let cmd_gap_ms: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(150);
+    // 配置目录：默认 %APPDATA%\com.easyinput.companion，可用第 5 个参数覆盖。
+    let dir = config_dir(args.get(5));
 
     let peer: SocketAddr = format!("{ip}:{port}")
         .parse()
         .unwrap_or_else(|e| panic!("peer 地址非法 {ip}:{port} — {e}"));
 
-    let dir = config_dir(args.get(4));
     println!("{}", "=".repeat(66));
     println!("8 场景顺序演练 · 走真实 bridge::dispatch 路径");
-    println!("目标 {peer} · 场景间隔 {gap_s:.1}s");
+    println!("目标 {peer} · 场景间隔 {gap_s:.1}s · 命令间隔 {cmd_gap_ms}ms");
     println!("配置目录 {}", dir.display());
     println!("{}", "=".repeat(66));
 
@@ -136,6 +144,16 @@ fn main() {
             }
             // dispatch 只把 OutCmd 塞进通道，这里做真正发送（真机运行时由
             // UDP 线程做这件事——本bin 把它内联到主循环，保持单线程确定性）。
+            //
+            // ⚠️ **同一场景的多条命令之间必须留间隔**（`cmd_gap_ms`）。
+            // 2026-10-15 ART-Pi 真机实测：一个场景展开出的 2–6 条命令若
+            // 无间隔连发，Ack 会随机丢失（实测 8 连发仅 1/8 收到 Ack），
+            // 且重传也救不回来（3 次重传全丢）⇒ 场景执行不全。
+            // 根因在板子侧（ctrl_server 每包 rt_kprintf + AP6212 接收
+            // 缓冲），PC 侧无法修固件，但**能让出节奏**：
+            // 真人按键天然 >200ms 间隔，所以这是"对齐真实使用节奏"，
+            // 不是为迁就 bug 而造假。
+            let mut first_cmd = true;
             while let Ok(cmd) = rx.try_recv() {
                 if let OutCmd::Send {
                     cmd: c,
@@ -143,6 +161,21 @@ fn main() {
                     label,
                 } = cmd
                 {
+                    // 让出节奏：首条立即发，后续每条前等 cmd_gap_ms。
+                    if !first_cmd {
+                        let until = Instant::now() + Duration::from_millis(cmd_gap_ms);
+                        while Instant::now() < until {
+                            for ev in link.pump(Duration::from_millis(10)) {
+                                if let LinkEvent::Acked { cmd, label } = ev {
+                                    println!("[{:6.1}s]   ✅ Ack cmd=0x{cmd:02X} {label}",
+                                             t0.elapsed().as_secs_f64());
+                                    inflight.retain(|c| *c != cmd);
+                                    total_acks += 1;
+                                }
+                            }
+                        }
+                    }
+                    first_cmd = false;
                     match link.send_command(c, &payload, &label) {
                         Ok(()) => {
                             println!("           → cmd=0x{c:02X} {label}");

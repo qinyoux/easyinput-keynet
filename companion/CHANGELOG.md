@@ -3,6 +3,59 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.2.2] - 2026-10-15
+
+**ART-Pi 真机首次闭环**，并修掉一个只有真机才暴露的系统级约束。
+
+### 真机联调结果
+
+ART-Pi（`D:\RT-ThreadStudio\workspace\MyART-PI`，RT-Thread + AP6212 WiFi，
+连 `vinno-guest`，DHCP 拿地址）与 Companion 建立 UDP :17335 连接：
+`scene-walk` 打 **10.10.21.29**，8 场景 31 条命令全部 Ack，连跑 3 次零丢失。
+证据：`证据/scene_walk_real_artpi.log`。
+
+### 修复
+
+1. **同一场景的多条命令连发会导致 ART-Pi 随机丢包**（真机实测，产品级问题）。
+   `spawn_udp_thread` 的 `while let Ok(cmd) = rx.try_recv()` 会把通道一次性
+   排空，一个场景展开出的 2–6 条命令在同一轮里无间隔发出。实测「离家」
+   场景 6 条命令 ×5 轮：
+
+   | 命令间隔 | Ack 率 |
+   |---------|--------|
+   | 0ms（连发） | 5/30（16%） |
+   | 150ms | 30/30（100%） |
+   | 250ms | 30/30（100%） |
+
+   丢包时**重传也救不回来**（3 次重传全丢）——板子丢包属接收缓冲溢出型，
+   200ms 后重发同样进不去。所以必须从源头降速，不能依赖重传兜底。
+   修法：`constants::CMD_GAP_MS = 150`，`spawn_udp_thread` 每轮内多条命令
+   之间让出间隔。根因在板子侧（`ctrl_server.c` 每包 `rt_kprintf` 阻塞收包
+   线程 + AP6212 接收缓冲），而路线 D 前提是固件零改动，故由 PC 侧迁就。
+   150ms 的依据是实测；真人按键天然 >200ms 间隔，这是对齐真实使用节奏。
+
+### 新增
+
+- **`tools/artpi_probe.py`：ART-Pi 协议级探测器**。给候选 IP 发 0x30 心跳，
+  **回 Ack 者即 ART-Pi**——不靠 MAC 前缀猜（DHCP 下 IP 不固定，AP6212 的
+  MAC 也难与同网设备区分）。支持 `--ip` 单测 / `--range` 全网段扫描。
+  - 踩坑：Windows `arp -a` 输出是 **GBK**，按 UTF-8 解会抛
+    UnicodeDecodeError（"动态"字段落在非 ASCII 区）。
+
+### 已知边界（真机侧观察，未改）
+
+- **温控上报 `-100.0℃`**：`SH_THERMO_TEMP_X10_BAD (-1000)` 是**传感器无效
+  哨兵值**，`thermo_ctrl.c` 在 `read_temp()` 失败时置 `err=1` + 该值。
+  即 ART-Pi 在如实上报"SHT30 没读到"，不是解析错误。Companion 侧目前会
+  原样显示 -100.0℃，**未做哨兵值识别**（显示为"传感器异常"更诚实）。
+- **状态帧设备顺序是注册序非 id 序**（实测 `5,6,1,2,3,4`）：真源
+  `on_query_status` 用 `dev_registry_get_by_index(i)` 遍历。Companion 按
+  条目内 id 字段取值，故不影响功能。
+- **ART-Pi 的 seq 去重窗口对递增序列失效**：`sh_frame_seq_fresh` 用
+  `diff = seq_last - seq`，seq 递增时 diff 恒 ≥ 16 ⇒ 永远走"窗口外"分支
+  并重置窗口 ⇒ 同 seq 重放挡不住。这是板子侧问题，**本次未改**（用户要求
+  先不动 ART-Pi），已记录待后续处理。
+
 ## [0.2.1] - 2026-10-15
 
 8 键全场景实机验证通过后的加固轮。**产品功能零变更**——本轮产出全部是
