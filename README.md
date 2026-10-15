@@ -71,6 +71,7 @@ cd companion && npm install && npm run tauri dev
 | Companion 单元 | 帧编解码 / 重传队列 / 场景机 / 配置 sanitize | `cargo test` **54/54 绿** |
 | 协议集成 | Python 客户端 ↔ 模拟器（重传换 seq / 坏帧 / 场景 M4 桩 / 温控仿真） | **18/18 绿** |
 | 端到端 | Companion 真身 ↔ 模拟器（启动查询 + 800ms 心跳 + seq 递增） | ✅ 日志实证 |
+| 真机端到端 | ART-Pi 真机（`10.10.21.29`）：8 场景 31 条命令全 Ack + 3 个 LED（PH3/PB13/PB2）物理点亮，亮灭与指令一致 | ✅ 2026-10-15 实测 |
 | 构建 | `cargo build` 0 警告 / `npm run build` / `tauri build` 出包 | ✅ |
 
 ## 与课程知识点的对应
