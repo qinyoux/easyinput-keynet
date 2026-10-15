@@ -6,8 +6,22 @@
 //! 回去读下一条"，一点都不能多（easyop 踩过的坑：把 6 秒的终端启动钉在监听
 //! 线程里，用户看到的是"按了没反应"）。
 //!
-//! 报文布局（固件 `host_action_protocol.h`）：
-//! `[0]=0x11 [1]=0x05(kind) [2..6]=4B header [6..42]=36B UUID`
+//! 报文布局（固件 `host_action_protocol.h`，并经 2026-10-15 实板 64B 报文逐字节核对）：
+//! ```text
+//! [0]    = 0x11          report_id
+//! [1]    = 0x05          kind (HOST_ACTION)
+//! [2]    = chunk_index   实测 0
+//! [3]    = total_chunks  实测 1
+//! [4]    = uuid_len      实测恒为 36 (0x24)
+//! [5..41] = 36B UUID      规范小写 hex，**起点就是 5，中间没有保留字节**
+//! [42..]  = 0 填充至 64B
+//! ```
+//!
+//! 实测样本（UUID = `00000000-0000-4000-8000-000000000009`）：
+//! `11 05 00 01 24 30 30 30 30 30 30 30 30 2D ...`——`[5]=0x30` 即 ASCII `'0'`，
+//! 直接就是 UUID 首字符。所以 `start = 1 + HOST_ACTION_V1_HEADER_LEN = 5` 是对的，
+//! 这里的 `HOST_ACTION_V1_HEADER_LEN = 4` 指「report_id 之后的那 4 字节」
+//! （kind / chunk / chunks / uuid_len）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
