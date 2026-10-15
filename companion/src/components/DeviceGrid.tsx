@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Snapshot } from "../types";
-import { DEVICE_NAMES } from "../types";
+import { DEVICE_NAMES, TEMP_X10_BAD, formatTemp } from "../types";
 
 interface Props {
   snapshot: Snapshot | null;
@@ -45,7 +45,9 @@ export function DeviceGrid({ snapshot, onChanged }: Props) {
                 <div className="row2">
                   <span>{d.id === 4 ? "目标" : on ? "开启" : "关闭"}</span>
                   {d.id === 4 ? (
-                    <span className="temp">{(d.temp_x10 / 10).toFixed(1)}℃</span>
+                    <span className={`temp ${d.temp_x10 === TEMP_X10_BAD ? "temp-bad" : ""}`}>
+                      {formatTemp(d.temp_x10)}
+                    </span>
                   ) : (
                     <>
                       <div className="bar">

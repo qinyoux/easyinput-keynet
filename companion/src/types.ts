@@ -9,6 +9,22 @@ export interface DeviceState {
   err: number;
 }
 
+/**
+ * 传感器无效哨兵值，与 ART-Pi `SH_THERMO_TEMP_X10_BAD(-1000)` 逐值对齐
+ * （真源：MyART-PI/applications/inc/sh_config.h）。
+ *
+ * 板子 thermo_ctrl 在 `read_temp()` 连续失败时置 `err=1` + 该哨兵值，
+ * 语义是「SHT30 没读到」，不是 -100℃ 实测值。验证期硬件未接传感器，
+ * 恒命中此值——UI 必须显示「传感器未接」，把 -1000 当温度渲染成
+ * 「-100.0℃」是把「没有数据」谎报成「有一个荒谬的数据」。
+ */
+export const TEMP_X10_BAD = -1000;
+
+/** 温度展示文本：哨兵值 → 「传感器未接」，否则 x.x℃。 */
+export function formatTemp(temp_x10: number): string {
+  return temp_x10 === TEMP_X10_BAD ? "传感器未接" : `${(temp_x10 / 10).toFixed(1)}℃`;
+}
+
 export interface SceneView {
   id: number;
   name: string;

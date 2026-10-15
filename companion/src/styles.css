@@ -329,6 +329,14 @@ body {
   color: var(--text-1);
 }
 
+/* 温控传感器未接（ART-Pi 上报哨兵值 -1000）：置灰明示「无数据」，
+ * 与 err-tag「故障码 1」互相印证——不是故障温度，是没有传感器。 */
+.temp-bad {
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: 12px;
+}
+
 .switch {
   position: relative;
   width: 34px;

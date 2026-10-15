@@ -1,0 +1,38 @@
+scons: Reading SConscript files ...
+scons: done reading SConscript files.
+
+scons: warning: you do not seem to have the pywin32 extensions installed;
+	parallel (-j) builds may not work reliably with open Python files.
+File "C:\Espressif\tools\python\Scripts\scons", line 204, in <module>
+scons: Building targets ...
+scons: building associated VariantDir targets: build
+CC build\applications\main.o
+LINK rt-thread.elf
+arm-none-eabi-objcopy -O binary rt-thread.elf rtthread.bin
+arm-none-eabi-size rt-thread.elf
+   text	   data	    bss	    dec	    hex	filename
+ 426996	   2372	  61644	 491012	  77e04	rt-thread.elf
+scons: done building targets.
+TypeError: _safe_remove() takes 1 positional argument but 2 were given:
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1381:
+    _exec_main(parser, values)
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1344:
+    _main(parser)
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1119:
+    nodes = _build_targets(fs, options, targets, target_top)
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1318:
+    jobs.run(postfunc = jobs_postfunc)
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Job.py", line 113:
+    postfunc()
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\Script\Main.py", line 1315:
+    SCons.SConsign.write()
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\SConsign.py", line 117:
+    syncmethod()
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 161:
+    self._os_unlink(self._file_name)
+Exception ignored in: <function dblite.__del__ at 0x0000021222DC9DA0>
+Traceback (most recent call last):
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 143, in __del__
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 140, in close
+  File "C:\Espressif\tools\python\Lib\site-packages\scons\SCons\dblite.py", line 161, in sync
+TypeError: _safe_remove() takes 1 positional argument but 2 were given

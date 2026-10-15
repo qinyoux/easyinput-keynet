@@ -3,6 +3,26 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.2.3] - 2026-10-15
+
+### 新增
+- **ART-Pi 真实 GPIO 绑定（验证期 LED 方案）**：`MyART-PI/applications/main.c` 三个占位
+  pin（-1）绑定实脚——PH3→主灯(id1)、PB13→插座1(id5)、PB2→插座2(id6)。选择依据是
+  8 场景 31 条命令的设备频次：主灯 10 条/7 场景、插座1 3 条、插座2 2 条，绑完后
+  7/8 场景有可见反馈。灯带/风扇/温控保持 -1 软件桩（PWM/SHT30 硬件未接）。
+  极性 RT_FALSE（GPIO 高电平点亮，LED 直脚常见接法），注释写明反转方法。
+  固件已 scons 编译通过（text 426,996 + data 2,372 + bss 61,644），
+  反汇编验证三个 pin 常量（29/18/115）已入 main.o。**烧录须钦友确认，未烧。**
+- `types.ts::formatTemp() + TEMP_X10_BAD`：温控哨兵识别。ART-Pi 在
+  `read_temp()` 失败时上报 `SH_THERMO_TEMP_X10_BAD(-1000)` + err=1，语义是
+  「SHT30 没读到」而非 -100℃ 实测。UI 显示「传感器未接」并置灰——
+  把哨兵值渲染成「-100.0℃」是把「没有数据」谎报成「荒谬的数据」。
+
+### 变更
+- 演示脚本 Checklist 加第 9/10 条（LED 映射自检、预期显示），新增「硬件映射与
+  烧录」小节（含 scons shebang 坑与 `.sconsign` TypeError 的正确处置），
+  S2 口播改为 LED 现实描述，翻车表补哨兵/极性/软件桩三条。
+
 ## [0.2.2] - 2026-10-15
 
 **ART-Pi 真机首次闭环**，并修掉一个只有真机才暴露的系统级约束。
