@@ -174,7 +174,9 @@ fn spawn_udp_thread(app: AppHandle, rx: Receiver<OutCmd>, peer: SocketAddr) {
         let mut last_emit = Instant::now();
         let mut dirty = true;
         // 同一轮里已发命令数：用于**命令节流**。详见下方 while 循环内注释。
-        let mut sent_this_round = 0usize;
+        // 不赋初值——循环体第一行（`sent_this_round = 0`）在任何读取之前
+        // 必定先执行，赋了反而触发 unused_assignments 警告。
+        let mut sent_this_round: usize;
         loop {
             // 1. 命令通道排空。
             let mut peer_changed = false;

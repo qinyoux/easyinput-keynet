@@ -3,6 +3,20 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.2.4] - 2026-10-15
+
+### 修复
+- `spawn_udp_thread` 命令节流引入的 `unused_assignments` 警告：
+  `sent_this_round` 初值在循环体第一行的每轮重置之前永不被读。改为
+  不赋初值声明（循环首行赋值先于一切读取）。0.2.2 引入节流时漏掉。
+
+### 流程自纠
+- 0.2.2/0.2.3 的收工校验用 `grep -cE "^warning: (unused|unreachable|variable)"`
+  统计警告数——模式过窄，漏掉了 lint 名 `unused_assignments`，
+  导致"0 警告"的结论不成立（`tauri dev` 后台日志才暴露）。
+  **零警告判据必须用全量 `grep -c "^warning"`**，白名单式过滤等于自己给
+  自己放水。本版起修正。
+
 ## [0.2.3] - 2026-10-15
 
 ### 新增
