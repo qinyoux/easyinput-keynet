@@ -16,8 +16,11 @@ use crate::home::scene::{default_scenes, SceneDef};
 pub const DEFAULT_ART_PI_IP: &str = "192.168.1.10";
 
 /// 场景展开模式。
-pub const SCENE_MODE_EXPAND: &str = "expand"; // Companion 展开成设备命令（MVP 默认）
-pub const SCENE_MODE_REMOTE: &str = "remote"; // 只发 0x47，等 ART-Pi M4 场景展开落地
+///
+/// 2026-10-16 起默认 `remote`：ART-Pi 的 `on_scene` 已落地真实现，只发 1 个
+/// 0x47 由板子本地展开，触摸场景栏高亮才会跟着 EasyInput 同步。
+pub const SCENE_MODE_EXPAND: &str = "expand"; // Companion 展开成设备命令（老固件退路）
+pub const SCENE_MODE_REMOTE: &str = "remote"; // 只发 0x47，ART-Pi 本地展开（默认）
 
 /// 一条 UUID → 动作绑定。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,9 +61,18 @@ impl Action {
     }
 }
 
+/// 当前配置结构版本。用于一次性迁移老配置（见 `migrate`）。
+///
+/// v1：初版，无显式版本字段（serde 缺省为 0）。
+/// v2：默认 `scene_mode` 由 `expand` 改为 `remote`（ART-Pi 已能本地展开）。
+pub const CONFIG_VERSION: u32 = 2;
+
 /// 完整配置。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeMap {
+    /// 配置结构版本。`#[serde(default)]` 让老文件缺这个字段时读成 0 → 触发迁移。
+    #[serde(default)]
+    pub config_version: u32,
     pub artpi_ip: String,
     #[serde(default = "default_port")]
     pub artpi_port: u16,
@@ -74,49 +86,63 @@ fn default_port() -> u16 {
     crate::constants::ART_PI_PORT
 }
 
+/// 默认场景模式：**remote**（只发 0x47，由 ART-Pi 本地展开）。
+///
+/// 2026-10-16 从 expand 改为 remote。ART-Pi 的 `on_scene` 已于 2026-10-16
+/// 从 `TODO(M4)` 桩落地为真实现（8 场景 30 命令，三端 parity 锁定），
+/// 原先「ART-Pi 不会展开所以必须 PC 侧展开」的前提已不成立。
+///
+/// 为什么不留 expand 作默认（它仍然可用，作为老固件/排障的退路）：
+/// expand 模式下 Companion 把场景拆成 4–6 条设备命令逐条发，ART-Pi
+/// **从未收到 0x47**，`sh_scene_execute()` / `sh_ui_set_active_scene()`
+/// 一次都不会被调用——结果是灯和上位机都同步了，唯独触摸屏场景栏
+/// 高亮不动（2026-10-16 真机实测）。remote 模式一个包就够，高亮由
+/// `sh_scene_execute` 单点收口，触摸 / EasyInput / FinSH 三路自动一致；
+/// 顺带把 4–6 个包降到 1 个，`CMD_GAP_MS=150ms` 节流约束也不再需要。
 fn default_scene_mode() -> String {
-    SCENE_MODE_EXPAND.to_string()
+    SCENE_MODE_REMOTE.to_string()
 }
 
 impl Default for HomeMap {
     fn default() -> Self {
-        let mut bindings = Vec::new();
+        let mut map = HomeMap {
+            config_version: CONFIG_VERSION,
+            artpi_ip: DEFAULT_ART_PI_IP.to_string(),
+            artpi_port: default_port(),
+            scene_mode: default_scene_mode(),
+            bindings: Vec::new(),
+            scenes: default_scenes(),
+        };
         // KEY1 → 回家，KEY2 → 影院（演示最常用的两个场景）。
-        bindings.push(Binding {
+        map.bindings.push(Binding {
             uuid: crate::constants::scene_uuid(1).unwrap().to_string(),
             action: Action::Scene { scene: 1 },
         });
-        bindings.push(Binding {
+        map.bindings.push(Binding {
             uuid: crate::constants::scene_uuid(4).unwrap().to_string(),
             action: Action::Scene { scene: 4 },
         });
         // KEY3–KEY8 → 6 台设备直控。
         for dev in 1..=6u8 {
-            bindings.push(Binding {
+            map.bindings.push(Binding {
                 uuid: crate::constants::device_toggle_uuid(dev).unwrap().to_string(),
                 action: Action::DeviceToggle { device: dev },
             });
         }
         // 编码器三向。
-        bindings.push(Binding {
+        map.bindings.push(Binding {
             uuid: crate::constants::UUID_ENCODER_LEFT.to_string(),
             action: Action::EncoderLeft,
         });
-        bindings.push(Binding {
+        map.bindings.push(Binding {
             uuid: crate::constants::UUID_ENCODER_RIGHT.to_string(),
             action: Action::EncoderRight,
         });
-        bindings.push(Binding {
+        map.bindings.push(Binding {
             uuid: crate::constants::UUID_ENCODER_PRESS.to_string(),
             action: Action::EncoderPress,
         });
-        HomeMap {
-            artpi_ip: DEFAULT_ART_PI_IP.to_string(),
-            artpi_port: default_port(),
-            scene_mode: default_scene_mode(),
-            bindings,
-            scenes: default_scenes(),
-        }
+        map
     }
 }
 
@@ -159,9 +185,29 @@ pub fn save(dir: &Path, map: &HomeMap) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// 一次性配置迁移：老配置（config_version < 2）里写死了 `scene_mode:"expand"`，
+/// 那会让 ART-Pi 收不到 0x47、触摸屏场景栏高亮永远不同步（2026-10-16 真机实测）。
+/// 这里把它拉回 `remote`，**并保留 expand 的显式选择权**：只有版本号落后的
+/// 老配置才被改；用户在新版里手动选 expand，保存后版本号已是 2，不会被再改。
+fn migrate(map: &mut HomeMap) {
+    if map.config_version >= CONFIG_VERSION {
+        return;
+    }
+    if map.scene_mode == SCENE_MODE_EXPAND {
+        map.scene_mode = SCENE_MODE_REMOTE.to_string();
+        crate::log_buffer::info(
+            "配置已升级到 v2：场景模式 expand → remote（ART-Pi 本地展开，触摸高亮同步）"
+                .to_string(),
+        );
+    }
+    map.config_version = CONFIG_VERSION;
+}
+
 /// 兜底清洗：端口 0、空 IP、非法 scene_mode、空场景表都拉回合法值。
 /// 宁可在加载时修掉，也不要让坏配置在运行期炸链路。
-fn sanitize(map: &mut HomeMap) {    if map.artpi_ip.trim().is_empty() {
+fn sanitize(map: &mut HomeMap) {
+    migrate(map);
+    if map.artpi_ip.trim().is_empty() {
         map.artpi_ip = DEFAULT_ART_PI_IP.to_string();
     }
     if map.artpi_port == 0 {
@@ -226,6 +272,63 @@ mod tests {
         assert_eq!(map, back);
     }
 
+    /// **老配置迁移（v1 → v2）**：真机缺陷的第二个入口。
+    ///
+    /// 只改 `default_scene_mode()` 是不够的——用户磁盘上的 home_map.json
+    /// 里明明白白写着 `"scene_mode": "expand"`，加载时会被原样保留，
+    /// 高亮不同步照旧。这条用例钉住"老配置必须被拉回 remote"。
+    #[test]
+    fn migrate_v1_expand_config_to_remote() {
+        // 复刻一份 v1 老配置：无 config_version 字段 + 显式 expand。
+        let legacy = r#"{
+            "artpi_ip": "10.10.21.29",
+            "artpi_port": 17335,
+            "scene_mode": "expand",
+            "bindings": [],
+            "scenes": []
+        }"#;
+        let mut map: HomeMap = serde_json::from_str(legacy).unwrap();
+        assert_eq!(map.config_version, 0, "老配置没有版本字段，应读成 0");
+        assert_eq!(map.scene_mode, SCENE_MODE_EXPAND);
+
+        sanitize(&mut map);
+        assert_eq!(
+            map.scene_mode, SCENE_MODE_REMOTE,
+            "v1 老配置的 expand 必须被迁移成 remote"
+        );
+        assert_eq!(map.config_version, CONFIG_VERSION);
+    }
+
+    /// 迁移只做一次：新版里用户**主动**选 expand，不该被再改回去。
+    /// 否则「expand 作为老固件退路」的承诺就是空的。
+    #[test]
+    fn migrate_respects_explicit_expand_on_v2() {
+        let mut map = HomeMap::default();
+        map.scene_mode = SCENE_MODE_EXPAND.to_string();
+        assert_eq!(map.config_version, CONFIG_VERSION);
+        sanitize(&mut map);
+        assert_eq!(
+            map.scene_mode, SCENE_MODE_EXPAND,
+            "已是 v2 的显式 expand 选择必须被尊重（老固件退路）"
+        );
+    }
+
+    /// 缺 config_version 且已是 remote 的老配置：迁移只补版本号，不动模式。
+    #[test]
+    fn migrate_does_not_touch_remote_mode() {
+        let legacy = r#"{
+            "artpi_ip": "10.10.21.29",
+            "artpi_port": 17335,
+            "scene_mode": "remote",
+            "bindings": [],
+            "scenes": []
+        }"#;
+        let mut map: HomeMap = serde_json::from_str(legacy).unwrap();
+        sanitize(&mut map);
+        assert_eq!(map.scene_mode, SCENE_MODE_REMOTE);
+        assert_eq!(map.config_version, CONFIG_VERSION);
+    }
+
     #[test]
     fn save_and_load_roundtrip() {
         let dir = std::env::temp_dir().join("companion-test-home-map");
@@ -253,7 +356,10 @@ mod tests {
         sanitize(&mut map);
         assert_eq!(map.artpi_ip, DEFAULT_ART_PI_IP);
         assert_eq!(map.artpi_port, crate::constants::ART_PI_PORT);
-        assert_eq!(map.scene_mode, SCENE_MODE_EXPAND);
+        // 非法 scene_mode 回落到**当前**默认（不写死字符串）——2026-10-16
+        // 默认由 expand 改 remote，这条断言跟着改过一次，写死会再次腐烂。
+        assert_eq!(map.scene_mode, default_scene_mode());
+        assert_eq!(map.scene_mode, SCENE_MODE_REMOTE);
         assert!(!map.bindings.iter().any(|b| b.uuid == "not-a-uuid"));
     }
 

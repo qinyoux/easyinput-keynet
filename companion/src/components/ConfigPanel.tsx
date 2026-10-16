@@ -15,7 +15,9 @@ interface Props {
  */
 export function ConfigPanel({ snapshot, onChanged }: Props) {
   const [ip, setIp] = useState(snapshot?.artpi_ip ?? "");
-  const [mode, setMode] = useState(snapshot?.scene_mode ?? "expand");
+  // 兜底与后端默认一致（2026-10-16 起 remote）。前端写死"expand"会在
+  // snapshot 未就绪时静默显示错模式，且诱导用户把展开模式存回配置。
+  const [mode, setMode] = useState(snapshot?.scene_mode ?? "remote");
   const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {

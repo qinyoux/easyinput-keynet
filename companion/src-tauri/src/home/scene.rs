@@ -1,16 +1,26 @@
 //! 家居场景状态机：8 场景定义、UUID→动作解析、设备状态跟踪。
 //!
-//! # 为什么场景在 PC 侧展开成设备命令
+//! # 场景为什么现在默认由 ART-Pi 本地展开
 //!
-//! TDD 原设计是「场景 0x47 在 ART-Pi 本地展开」，但 ART-Pi `cmd_dispatch.c`
-//! 的 `on_scene` 目前是 `TODO(M4)` 桩（收了帧什么都不做）。方案 D 的 MVP
-//! 必须**今天就能演示**，因此 Companion 把场景展开成 0x40–0x46 设备命令逐条
-//! 发送——这些命令 ART-Pi 侧已完整实现（继电器/SHT30 联调目标）。
+//! 初版这里是「Companion 展开成设备命令」：ART-Pi `cmd_dispatch.c` 的
+//! `on_scene` 当时是 `TODO(M4)` 桩，Companion 只能把场景拆成 0x40–0x46
+//! 逐条发。这条路能跑，但有致命副作用：
 //!
-//! 配置项 `scene_mode` 保留两条路：
-//! - `"expand"`（默认，MVP）：Companion 展开，ART-Pi 零依赖；
-//! - `"remote"`：只发 0x47，等 ART-Pi M4 落地后切换。
-//! 两条路都安全：设备命令幂等，不会双执行。
+//! **ART-Pi 从未收到 0x47，`sh_scene_execute()` 一次都不会被调用。**
+//! 结果灯和上位机都同步了（那4–6 条设备命令确实执行了），唯独触摸屏
+//! 场景栏高亮不动——2026-10-16 真机实测才发现。用户原话：「EasyInput触发
+//! 同一场景，高亮没有同步，但是灯和上位机是同步了」。
+//!
+//! ART-Pi 的 `on_scene` 已于 2026-10-16 落地为真实现（8 场景 30 命令，
+//! 三端 parity 由 `tools/scene_parity.py` 锁定），所以：
+//!
+//! - `"remote"`（**2026-10-16 起的默认**）：只发 1 个 0x47，板子本地展开
+//!   → 灯、继电器、上位机、触摸屏高亮四者一致，且少发 3–5 个包。
+//! - `"expand"`（仍可用，老固件退路）：PC 侧展开，触摸高亮必然不同步。
+//!
+//! 本模块的 `SceneCmd` / `activate()` 在 remote 模式下**仍被使用**——
+//! `SceneManager::activate()` 负责本地状态推进（上位机高亮 + 设备状态跟踪），
+//! 只是不再负责生成线上命令。见 `bridge::dispatch`。
 
 use std::collections::BTreeMap;
 
@@ -134,11 +144,31 @@ impl SceneManager {
         self.active
     }
 
-    /// 远程场景模式下由桥接层置位（不展开设备命令，本地状态等回传）。
-    pub fn set_active(&mut self, id: u8) {
-        if self.find(id).is_some() {
-            self.active = Some(id);
+    /// remote 模式（默认，2026-10-16 起）：激活场景并**本地推演**设备状态。
+    ///
+    /// 线上只发 1 个 0x47（ART-Pi 侧本地展开），但上位机的设备状态不该
+    /// 空等状态帧回来才变——场景表就在本地，推演一次上位机立刻就同步。
+    /// 权威状态随后由 `apply_status()` 用链路回传覆盖。
+    ///
+    /// 与 `activate()` 的区别只在于**不生成线上命令**；状态推进逻辑共用，
+    /// 保证两条路的上位机表现一致。
+    ///
+    /// 场景未定义时返回 Err（`set_active` 那种静默忽略只适合内部调用）。
+    pub fn activate_remote(&mut self, id: u8) -> Result<(), String> {
+        let scene = self
+            .find(id)
+            .ok_or_else(|| format!("场景 {id} 未定义（合法 1..=8）"))?
+            .clone();
+        for cmd in &scene.commands {
+            cmd.apply_to(&mut self.states);
         }
+        self.active = Some(id);
+        log_buffer::info(format!(
+            "激活场景「{}」（{} 条命令，由 ART-Pi 本地展开）",
+            scene.name,
+            scene.commands.len()
+        ));
+        Ok(())
     }
 
     /// 替换场景表（配置保存后同步；保留设备状态与当前激活位）。

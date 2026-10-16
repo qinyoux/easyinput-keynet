@@ -1,7 +1,7 @@
 {
   "name": "easyinput-companion",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.3.0",
   "type": "module",
   "description": "EasyInput Companion：EasyInput 开发板 × PC × ART-Pi 智能家居中控（第8课大作业 · 方案D MVP）",
   "scripts": {

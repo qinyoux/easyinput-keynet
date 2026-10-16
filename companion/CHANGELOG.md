@@ -3,6 +3,45 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.3.0] - 2026-10-16
+
+### 修复
+- **★ EasyInput 触发场景时触摸屏高亮不同步**（真机反馈驱动，用户原话：
+  「EasyInput触发同一场景，高亮没有同步，但是灯和上位机是同步了」）。
+  **根因不在 ART-Pi，在Companion 默认场景模式**：初版因为 ART-Pi `on_scene`
+  还是 `TODO(M4)` 桩，默认走 `scene_mode="expand"`——Companion 把场景拆成
+  4–6 条设备命令逐条发，**ART-Pi 从未收到 0x47**，`sh_scene_execute()` /
+  `sh_ui_set_active_scene()` 一次都没被调用。灯和上位机确实同步了（那几条命令
+  真执行了），所以这个 bug 极具迷惑性：不是偶发，是**必然**。
+  ART-Pi 侧 `on_scene` 已于本日落地为真实现，默认模式随之改为 `remote`
+  （只发 1 个 0x47，板子本地展开 + 置位高亮）。
+- **老配置迁移**（`config_version` v1 → v2）：只改默认值是不够的——用户磁盘上
+  的 `home_map.json` 明写`"scene_mode": "expand"`，加载时被原样保留。迁移把
+  版本号落后的老配置拉回 `remote`；已是 v2 的用户**显式选 expand 会被尊重**
+  （老固件退路依然可用，不会被反复改回）。
+
+### 新增
+- `SceneManager::activate_remote()`：remote 模式只发 1 个 0x47，但本地**照样推演
+  设备状态**（复用 `apply_to`）——上位机设备卡片不必空等状态帧回来才变。
+  原`set_active()` 只置激活位、不推演状态，已替换。
+- `HomeMap::config_version` 字段 + `migrate()`，v1→v2 一次性迁移。
+- 6 条回归测试（62 → 68）：默认模式必须只发 1 个 `0x47`、remote 模式本地状态
+  推演、未定义场景必须报错且不发包、老配置 expand→remote 迁移、v2 显式expand
+  被尊重、remote 模式不被迁移改动。
+- 证据：`证据/scene_walk_remote_mode.log`（8 场景 9 包全 Ack）。
+
+### 变更
+- **默认 `scene_mode`：`expand` → `remote`**。`expand` 保留为老固件退路，但**在
+  该模式下触摸场景栏高亮必然不同步**（这是它的固有语义，不是 bug）。
+- 场景 8 演练耗时从约 12s 降到 1.6s（4–6 个包 → 1 个包），且不再受真机实测的
+  `CMD_GAP_MS=150ms` 连发节流约束——本地展开在单帧内同步完成，不经收包通道。
+
+### 教训
+- **"代码路径存在" ≠ "路径会被走到"。** 上一轮把「触摸/PC/FinSH 三路高亮单点
+  收口」当成已验证结论汇报，实际只验了 ART-Pi 侧路径存在，没验 Companion
+  默认配置会不会发0x47。主机单测 114 断言全绿也照样漏了——测的是 ART-Pi，
+  缺陷在 PC 侧。**跨端功能的"已同步"必须有跨端实测证据。**
+
 ## [0.2.6] - 2026-10-16
 
 ### 修复

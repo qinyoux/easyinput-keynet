@@ -73,18 +73,34 @@ companion/
 
 ## 已知边界（MVP 裁剪，详见 CHANGELOG）
 
-- 场景展开**两路并存且语义一致**：ART-Pi `on_scene` 已从 TODO(M4) 桩落地为
-  `sh_scene.c` 本地展开（8 场景 30 条命令，实测真机 8 场景 31 命令全 Ack），
-  Companion 仍默认 PC 侧展开；`scene_mode="remote"` 预留切换。三端场景表
-  （ART-Pi `sh_scene.c` / Companion `scene.rs` / `artpi_sim.py`）由
-  `tools/scene_parity.py` 程序化校验逐条一致。
+- **场景展开：默认 `remote`（ART-Pi 本地展开）**。ART-Pi `on_scene` 已从
+  `TODO(M4)` 桩落地为 `sh_scene.c` 本地展开（8 场景 30 命令），Companion 只发
+  1 个 `0x47`，由板子展开并置位触摸屏场景栏高亮——**触摸 / EasyInput / FinSH
+  三路高亮自动一致**。`scene_mode="expand"`（PC 侧展开）保留为老固件退路，但
+  **该模式下触摸高亮必然不同步**（ART-Pi 收不到 0x47，这是该模式固有语义）。
+  老配置会自动迁移（v1→v2）；三端场景表（ART-Pi `sh_scene.c` /
+  Companion `scene.rs` / `artpi_sim.py`）由 `tools/scene_parity.py` 程序化校验。
 - 无 Wi-Fi 自动发现：ART-Pi IP 需手动配置（默认 192.168.1.10）。
-- 测试基线：`cargo test` 62/62 绿、`cargo build` 0 警告、`npm run build` 通过、
-  出包 + 12s 运行时冒烟通过。
+- 测试基线：`cargo test` 68/68 绿、`cargo build` 0 警告、`npm run build` 通过、
+  出包 + 运行时冒烟通过。
 
 ## 版本历史
 
 用户视角摘要（开发者视角见 `CHANGELOG.md`）。
+
+### 0.3.0 — 2026-10-16
+
+**修了一个你现场抓到的 bug：按 EasyInput 触发场景，触摸屏高亮不动。**
+
+灯和上位机都同步了，唯独屏幕上的场景栏不高亮——原因不在板子，在 PC 侧：
+Companion 以前默认把场景拆成 4–6 条设备命令逐条发，ART-Pi 从头到尾没收到过
+"场景"指令，所以触摸屏不知道该高亮哪个。现在改成只发 1 个场景指令，板子自己
+展开，**四个出口（灯、上位机、触摸屏、继电器）共用同一次执行**，不可能再分叉。
+
+顺带两个好处：8 个场景演练从约 12 秒缩到 1.6 秒；每场景从 4–6 个包降到 1 个包。
+
+**你不用改任何配置**：老配置会自动升级。如果你是故意用 expand 模式配老固件，
+手动选它不会被覆盖。
 
 ### 0.2.6 — 2026-10-16
 

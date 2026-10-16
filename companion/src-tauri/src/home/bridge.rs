@@ -13,6 +13,10 @@
 
 use std::sync::mpsc::Sender;
 
+// SCENE_MODE_EXPAND / Binding 只在测试里用（显式构造退路模式与绑定），
+// 主代码不引用，放进 cfg(test) 块避免主编译告警。
+#[cfg(test)]
+use crate::config_store::{Binding, SCENE_MODE_EXPAND};
 use crate::config_store::{Action, HomeMap, SCENE_MODE_REMOTE};
 use crate::constants::*;
 use crate::home::scene::SceneManager;
@@ -62,12 +66,13 @@ pub fn dispatch(
     match action {
         Action::Scene { scene } => {
             if map.scene_mode == SCENE_MODE_REMOTE {
-                // 远程模式：只发 0x47，由 ART-Pi 展开（M4 落地后启用）。
+                // 远程模式（默认）：只发 1 个 0x47，由 ART-Pi 本地展开。
+                // 这样触摸场景栏高亮才会跟着 EasyInput 一起变（2026-10-16 修）。
                 let name = mgr
                     .find(scene)
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| format!("场景{scene}"));
-                mgr.set_active(scene);
+                mgr.activate_remote(scene)?;
                 send(tx, CMD_SCENE, &[scene], format!("场景「{name}」（远程展开）"));
                 Ok(format!("已发送场景「{name}」（0x47，ART-Pi 本地展开）"))
             } else {
@@ -174,14 +179,76 @@ mod tests {
         assert!(resolve_action("00000000-0000-4000-8000-000000000999", &map).is_none());
     }
 
+    /// expand 模式（退路，2026-10-16 起非默认）：Companion 逐条发设备命令。
+    /// 显式设 mode，不依赖默认值——默认已是 remote。
     #[test]
     fn dispatch_scene_expand_sends_device_commands() {
-        let (map, mut mgr, tx, rx) = setup();
+        let (mut map, mut mgr, tx, rx) = setup();
+        map.scene_mode = SCENE_MODE_EXPAND.to_string();
         let msg = dispatch(crate::constants::scene_uuid(4).unwrap(), &map, &mut mgr, &tx).unwrap();
         assert!(msg.contains("影院"));
         // 影院 = 主灯30% + 插座1开 = 2 条命令。
         assert_eq!(rx.try_iter().count(), 2);
         assert_eq!(mgr.active(), Some(4));
+    }
+
+    /// **默认模式必须只发 1 个 0x47**（2026-10-16 真机反馈驱动）。
+    ///
+    /// 缺陷现象：EasyInput 触发场景后灯和上位机都同步了，唯独触摸屏
+    /// 场景栏高亮不动。根因 = 默认 expand 模式下 Companion 把场景拆成
+    /// 4–6 条设备命令逐条发，ART-Pi 从未收到 0x47，`sh_scene_execute()`
+    /// / `sh_ui_set_active_scene()` 一次都没被调用。
+    #[test]
+    fn default_mode_sends_single_0x47_so_board_sets_highlight() {
+        let (map, mut mgr, tx, rx) = setup();
+        // 不覆盖 scene_mode：这就是出厂默认路径。
+        assert_eq!(
+            map.scene_mode, SCENE_MODE_REMOTE,
+            "默认场景模式必须是 remote，否则触摸高亮永远不同步"
+        );
+        dispatch(crate::constants::scene_uuid(1).unwrap(), &map, &mut mgr, &tx).unwrap();
+        let cmds: Vec<OutCmd> = rx.try_iter().collect();
+        assert_eq!(
+            cmds.len(),
+            1,
+            "默认模式必须只发 1 条命令；发出多条说明 ART-Pi 收不到 0x47"
+        );
+        match &cmds[0] {
+            OutCmd::Send { cmd, payload, .. } => {
+                assert_eq!(*cmd, CMD_SCENE, "必须是 0x47 场景帧");
+                assert_eq!(payload, &vec![1]);
+            }
+            _ => panic!(),
+        }
+        assert_eq!(mgr.active(), Some(1), "本地激活态也要同步（上位机高亮）");
+    }
+
+    /// remote 模式不生成线上命令，但**上位机设备状态照样要本地推演**——
+    /// 不能空等状态帧回来（2026-10-16 加：`activate_remote` 复用 apply_to）。
+    #[test]
+    fn default_mode_also_updates_local_device_states() {
+        let (map, mut mgr, tx, _rx) = setup();
+        dispatch(crate::constants::scene_uuid(4).unwrap(), &map, &mut mgr, &tx).unwrap();
+        // 影院 = 主灯 30% + 插座1 开。
+        let main = mgr.states().into_iter().find(|s| s.id == 1).unwrap();
+        assert_eq!(main.level, 30, "影院应把主灯推到 30%");
+        let sock1 = mgr.states().into_iter().find(|s| s.id == 5).unwrap();
+        assert_eq!(sock1.onoff, 1, "影院应打开插座1");
+    }
+
+    /// 场景未定义必须报错，不能静默发一个板子会拒的 0x47。
+    #[test]
+    fn remote_mode_rejects_undefined_scene() {
+        let (map, mut mgr, tx, rx) = setup();
+        let uuid = "00000000-0000-4000-8000-0000000001ff";
+        let mut m2 = map.clone();
+        m2.bindings = vec![Binding {
+            uuid: uuid.to_string(),
+            action: Action::Scene { scene: 99 },
+        }];
+        let err = dispatch(uuid, &m2, &mut mgr, &tx).unwrap_err();
+        assert!(err.contains("未定义"), "实际错误：{err}");
+        assert_eq!(rx.try_iter().count(), 0, "非法场景不该发出任何包");
     }
 
     #[test]

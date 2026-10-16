@@ -1,6 +1,6 @@
 [package]
 name = "easyinput-companion"
-version = "0.2.6"
+version = "0.3.0"
 description = "EasyInput Companion：EasyInput 开发板 × PC × ART-Pi 智能家居中控（第8课大作业 · 方案D MVP）"
 authors = ["easyinput-keynet"]
 edition = "2021"
