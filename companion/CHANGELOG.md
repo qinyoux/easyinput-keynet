@@ -3,6 +3,42 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.3.1] - 2026-10-16
+
+### 修复
+- **★ 「阅读」场景后 ON/OFF 标识不变**（真机反馈：「easyinput按阅读场景时，
+  触摸屏上的功率等级会变，但是 ON和 OFF 的状态标识不会变」）。三侧同步修复：
+  - **ART-Pi 真源** `dev_light.c: light_set_level()` 调了继电器、写了
+    `state.level`，**唯独没写 `dev->state.onoff`** ⇒ 物理灯亮了、亮度也变了，
+    状态字段停在 0⇒ UI 标识 / Companion 状态帧全部显示「关」。
+    对齐 `fan_set_level()`（本来就有写）与 `light_on()`。
+  - **Companion** `SceneCmd::apply_to` 的 `LightLevel`/`FanLevel` 分支照抄了
+    同一漏写 ⇒ 上位机与板子一起错。
+  - **模拟器** `artpi_sim.py` 同样两处都漏写。
+  - 联动语义：`level > 0 ⇒ onoff = 1`，`level == 0 ⇒ onoff = 0`。
+
+### 新增
+- **`test_dev_state.c` 设备层状态一致性主机测试套件**（17 断言，ART-Pi
+  `host_test/`，链入真实 `dev_light.c`/`dev_relay.c`/`dev_fan.c`）。钉住的不变式
+  是「**物理输出与 `state.*` 必须一致**」，且记录 `rt_pin_write` 真实写入，能抓
+  "状态对了但物理没动"的反向 bug。
+  **为什么必须新增**：此前设备层**没有任何测试**——两个上层套件里
+  `cmd_dispatch` 是桩，设备层实现从未被任何断言执行过。这就是本bug 能溜到
+  真机才被发现的直接原因。
+- 2 条Companion 回归测试（68 → 70）：LEVEL 必须联动 onoff（灯/风扇两个方向）。
+- 5 条模拟器集成用例（34 → 39）：阅读场景 onoff 联动 + level=0 反向联动。
+- ART-Pi `host_test/run.sh` 接入第三套件（114 → **131 断言**）。
+
+### 修复（附带发现）
+- **模拟器同一逻辑有两份拷贝**（`execute()` 直连分支 + `_apply_device_cmd()`
+  场景展开分支），我先只改了后者，被新加的测试立刻逮住（"场景能亮、直连不能"）。
+  两处都已修。这就是本项目反复吃过的教训：**同步修改先 grep 全树**。
+
+### 教训
+- **「设备层无测试」本身就是最大的风险**。三层里协议层、UI 层都有测试，
+  唯独设备层空着，而设备层恰好是"物理动作与状态字段"最容易分叉的地方。
+  补测试不是补功能，是补**发现能力**。
+
 ## [0.3.0] - 2026-10-16
 
 ### 修复

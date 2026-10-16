@@ -223,6 +223,34 @@ mod tests {
         assert_eq!(mgr.active(), Some(1), "本地激活态也要同步（上位机高亮）");
     }
 
+    /// ★ LEVEL 命令必须联动 onoff（2026-10-16 真机反馈驱动）。
+    ///
+    /// 现象：「阅读」场景后屏幕亮度变了但 ON/OFF 标识不变。真源
+    /// `light_set_level` 漏写 `state.onoff`，Companion 的 `apply_to` 照抄了
+    /// 同一漏写，于是上位机与板子一起错——**三侧语义必须同时修**。
+    #[test]
+    fn level_command_also_flips_onoff() {
+        let (map, mut mgr, tx, _rx) = setup();
+        // 场景 5「阅读」= 主灯 100% + 灯带 50%，全是 level 命令、无 onoff 命令。
+        // 默认绑定表只绑了场景 1/4，这里显式构造绑定（不靠默认 UUID 覆盖）。
+        let uuid = crate::constants::scene_uuid(5).unwrap();
+        let mut m2 = map.clone();
+        m2.bindings.retain(|b| !matches!(b.action, Action::Scene { .. }));
+        m2.bindings.push(Binding {
+            uuid: uuid.to_string(),
+            action: Action::Scene { scene: 5 },
+        });
+        dispatch(uuid, &m2, &mut mgr, &tx).unwrap();
+        for (id, level) in [(1u8, 100u8), (2u8, 50u8)] {
+            let s = mgr.states().into_iter().find(|s| s.id == id).unwrap();
+            assert_eq!(s.level, level, "设备{id} 亮度错");
+            assert_eq!(
+                s.onoff, 1,
+                "level={level} > 0 却仍显示关 —— 这就是 ON/OFF 标识不变的根因"
+            );
+        }
+    }
+
     /// remote 模式不生成线上命令，但**上位机设备状态照样要本地推演**——
     /// 不能空等状态帧回来（2026-10-16 加：`activate_remote` 复用 apply_to）。
     #[test]

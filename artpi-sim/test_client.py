@@ -338,6 +338,28 @@ def main() -> int:
         ack = c.send_reliable(CMD_SCENE, bytes([9]))   # 未知场景 id
         check("0x47 未知 id → 仍回 Ack（复刻真源失败也 Ack）", ack is not None)
 
+        # ★ LEVEL 联动 onoff（2026-10-16 真机反馈驱动，三侧同步修复）
+        # 「阅读」= 主灯 100% + 灯带 50%，**只有 level 命令、没有 onoff 命令**。
+        # 真源 light_set_level 此前漏写 state.onoff ⇒ 物理灯亮了但 UI 标识
+        # 仍显示「关」（钦友现场反馈）。模拟器当时照抄了同一漏写。
+        ack = c.send_reliable(CMD_SCENE, bytes([5]))
+        check("0x47 阅读 → Ack", ack is not None)
+        st = c.dev_state(1)
+        check("阅读场景主灯 level=100", st is not None and st[1] == 100, f"实际 {st}")
+        check("阅读场景主灯 onoff=1（亮度>0 即开）",
+              st is not None and st[0] == 1,
+              f"实际 {st} —— onoff 未联动，这就是 ON/OFF 标识不变的根因")
+        st = c.dev_state(2)
+        check("阅读场景灯带 level=50 且 onoff=1",
+              st is not None and st[1] == 50 and st[0] == 1, f"实际 {st}")
+        # 反向：level=0 必须联动为关
+        c.send_reliable(CMD_LIGHT_LEVEL, bytes([1, 0]))
+        st = c.dev_state(1)
+        check("level=0 后 onoff=0（反向联动）",
+              st is not None and st[0] == 0, f"实际 {st}")
+        # 复位主灯亮度，避免影响后续温控等用例的初始期望
+        c.send_reliable(CMD_LIGHT_LEVEL, bytes([1, 80]))
+
         print("== 温控仿真 ==")
         # ⚠️ 本用例踩过三个坑，每一个都表现为"报失败但产品代码完全正常"：
         #

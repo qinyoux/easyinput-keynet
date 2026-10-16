@@ -365,7 +365,12 @@ class ArtPiSim:
                 log(f"⚙ {DEV_NAMES[dev]}{'开' if val else '关'}"
                     f"（seq={f.seq}）")
             else:
+                # LEVEL 联动 onoff（2026-10-16 对齐真源修复）。**注意这里必须与
+                # _apply_device_cmd() 同步改**——同一逻辑存在两份拷贝（0x41直连
+                # 与 0x47 场景展开各一份），此前只改一处导致"场景能亮、直连不能"，
+                # 测试立刻逮住。这正是本项目反复吃过的教训：同步修改先grep 全树。
                 d.level = min(val, 100)
+                d.onoff = 1 if d.level > 0 else 0
                 log(f"⚙ {DEV_NAMES[dev]}{'亮度' if f.cmd == CMD_LIGHT_LEVEL else '挡位'}"
                     f"{d.level}%（seq={f.seq}）")
             self.dirty = True
@@ -489,7 +494,13 @@ class ArtPiSim:
             if cmd in (CMD_LIGHT_ONOFF, CMD_FAN_ONOFF, CMD_SOCKET_ONOFF):
                 d.onoff = val
             else:
+                # LEVEL 命令的 onoff 联动（2026-10-16 对齐真源修复）：
+                # 真源 light_set_level / fan_set_level 在 level>0 时都会把
+                # state.onoff 置 1（level=0 走 off 归 0）。修复前真源灯漏写
+                # onoff，导致「阅读」场景物理灯亮了但状态标识仍是「关」——
+                # 钦友现场反馈。模拟器此前照抄了这个漏写，一并修掉。
                 d.level = min(val, 100)
+                d.onoff = 1 if d.level > 0 else 0
             return True
         if cmd == CMD_THERMO_TARGET:
             if len(payload) < 3:

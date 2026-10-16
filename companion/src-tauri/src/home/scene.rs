@@ -83,12 +83,26 @@ impl SceneCmd {
     }
 
     /// 乐观本地状态：这条命令会把哪台设备改成什么样（可视化用）。
+    /// 把一条场景命令应用到本地状态视图。
+    ///
+    /// **LEVEL 命令要联动 onoff**（2026-10-16 对齐真源修复）：真源
+    /// `light_set_level` / `fan_set_level` 在 `level > 0` 时把 `state.onoff`
+    /// 置 1、`level == 0` 时归 0。修复前真源灯漏写 onoff ⇒ 「阅读」场景
+    /// 物理灯亮了但 UI 标识仍显示「关」（钦友现场反馈）。此处此前照抄了
+    /// 该漏写，导致上位机与板子一起错；三侧现在对齐同一语义。
     fn apply_to(&self, states: &mut BTreeMap<u8, DeviceState>) {
+        /// level>0 ⇒ 视为开；level==0 ⇒ 关。
+        fn set_level_and_onoff(states: &mut BTreeMap<u8, DeviceState>, dev: u8, level: u8) {
+            let level = level.min(100);
+            let e = entry(states, dev);
+            e.level = level;
+            e.onoff = u8::from(level > 0);
+        }
         match *self {
             SceneCmd::LightOnOff { dev, on } => entry(states, dev).onoff = on as u8,
-            SceneCmd::LightLevel { dev, level } => entry(states, dev).level = level,
+            SceneCmd::LightLevel { dev, level } => set_level_and_onoff(states, dev, level),
             SceneCmd::FanOnOff { dev, on } => entry(states, dev).onoff = on as u8,
-            SceneCmd::FanLevel { dev, level } => entry(states, dev).level = level,
+            SceneCmd::FanLevel { dev, level } => set_level_and_onoff(states, dev, level),
             SceneCmd::ThermoTarget { .. } => {}
             SceneCmd::ThermoMode { .. } => {}
             SceneCmd::SocketOnOff { dev, on } => entry(states, dev).onoff = on as u8,
@@ -379,6 +393,36 @@ mod tests {
         let mut m = mgr();
         assert!(m.activate(9).is_err());
         assert!(m.activate(0).is_err());
+    }
+
+    /// ★ LEVEL 联动 onoff 的两个方向（2026-10-16 修真源漏写时同步补上）。
+    ///
+    /// 真源 `light_set_level` 此前漏写 `state.onoff`：物理灯亮了、亮度也变了，
+    /// 状态字段停在 0 ⇒ 触摸屏 ON/OFF 标识不动（钦友现场反馈）。
+    /// 这里钉住语义：level>0 ⇒ on；level==0 ⇒ 关。
+    #[test]
+    fn level_command_links_onoff_both_directions() {
+        let mut m = mgr();
+        // 正向：level>0 必须把 onoff 置 1
+        m.activate(5).unwrap(); // 阅读：主灯 100% + 灯带 50%
+        let main = m.states().into_iter().find(|s| s.id == 1).unwrap();
+        assert_eq!(main.level, 100);
+        assert_eq!(main.onoff, 1, "level=100 却显示关 —— ON/OFF 标识不变的根因");
+        let strip = m.states().into_iter().find(|s| s.id == 2).unwrap();
+        assert_eq!(strip.level, 50);
+        assert_eq!(strip.onoff, 1, "灯带 level=50 却显示关");
+
+        // 反向：level=0 必须反向联动为关（不能"0% 但显示开"）
+        let mut states = BTreeMap::new();
+        entry(&mut states, 1).onoff = 1;
+        SceneCmd::LightLevel { dev: 1, level: 0 }.apply_to(&mut states);
+        assert_eq!(states.get(&1).unwrap().onoff, 0, "level=0 应为关");
+        assert_eq!(states.get(&1).unwrap().level, 0);
+
+        // 风扇同理
+        let mut states2 = BTreeMap::new();
+        SceneCmd::FanLevel { dev: 3, level: 60 }.apply_to(&mut states2);
+        assert_eq!(states2.get(&3).unwrap().onoff, 1, "风扇 level=60 应为开");
     }
 
     #[test]
