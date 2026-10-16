@@ -3,7 +3,8 @@
 //! 与 ART-Pi `frame_codec.c` 逐字节对齐：
 //! - 线上格式大端（seq）、CRC 小端存储、CRC 覆盖前 9+len 字节；
 //! - decode 是唯一字节序转换点，业务层永远面向 `Frame` 编程；
-//! - `SeqWindow` 复刻 ART-Pi 16 槽位图语义（含"窗口外视为新流"的重置规则）。
+//! - `SeqWindow` 复刻 ART-Pi 16 槽位图语义（回绕差分判定：领先前移 /
+//!   出窗旧流重置 / 同 seq 与窗内已见即重放）。
 //!
 //! ⚠️ PC 侧**不**用 SeqWindow 去重（那是接收方的事）；这里实现它是为了
 //! 单测锁死 ART-Pi 的行为假设——尤其"重传必须换 seq"这条（见
@@ -87,28 +88,57 @@ pub fn decode(buf: &[u8]) -> Result<Frame, String> {
 
 /// seq 去重滑动窗口——**逐位复刻** ART-Pi `sh_frame_seq_fresh` 的槽位图语义。
 ///
-/// 存在的意义是单测：PC 侧靠 `RetransmitQueue` 换 seq 来绕过这个窗口，
+/// 判定用无符号 16 位回绕差分（RFC 1982 思路）：
+/// - `diff == 0`：与最新帧同 seq，重放，拒；
+/// - `diff ∈ [1, WINDOW)`：落后 1..15，查位图，置位即重放/乱序重传，拒；
+/// - `diff ∈ [WINDOW, 0x8000)`：落后 16..32767，窗口外旧流（对端重启），重置放行；
+/// - `diff >= 0x8000`：seq 领先（正常递增流），窗口前移，放行。
+///
+/// 演进记录（2026-10-16）：旧版把 `diff >= WINDOW` 一律当新流重置，递增流每帧
+/// 重置、位图永远只剩 1 位，last-1 重放拦不住（实测前丢过包）。现按差分符号
+/// 分流。存在的意义是单测：PC 侧靠 `RetransmitQueue` 换 seq 来绕过这个窗口，
 /// 测试必须先证明"同 seq 重传会被吃"这件事在这里成立。
 #[derive(Debug, Default)]
 pub struct SeqWindow {
     last: u16,
     mask: u32,
+    inited: bool,
 }
 
 impl SeqWindow {
     pub fn fresh(&mut self, seq: u16) -> bool {
+        if !self.inited {
+            self.inited = true;
+            self.last = seq;
+            self.mask = 1;
+            return true;
+        }
         let diff = self.last.wrapping_sub(seq);
+        if diff == 0 {
+            return false; // 与最新帧同 seq：重放
+        }
         if diff < FRAME_SEQ_WINDOW {
             let bit = 1u32 << diff;
             if self.mask & bit != 0 {
-                return false; // 窗口内重复：丢弃
+                return false; // 窗口内已见：重放/乱序重传
             }
             self.mask |= bit;
             return true;
         }
-        // 窗口外：视为新流（首次或跳变），重置窗口。
+        if diff < 0x8000 {
+            // 落后 16..32767：窗口外旧流（对端重启/换流），重置窗口。
+            self.last = seq;
+            self.mask = 1;
+            return true;
+        }
+        // diff >= 0x8000：seq 领先 last（正常递增流），窗口前移。
+        let advance = 0x10000u32 - diff as u32; // 1..32767
+        if advance >= FRAME_SEQ_WINDOW as u32 {
+            self.mask = 1; // 整窗跳出，只留最新一槽
+        } else {
+            self.mask = ((self.mask << advance) | 1) & 0xFFFF;
+        }
         self.last = seq;
-        self.mask = 1;
         true
     }
 }
@@ -233,20 +263,54 @@ mod tests {
         let mut w = SeqWindow::default();
         // 首次 seq 视为新流。
         assert!(w.fresh(100));
-        // 窗口内同 seq：重复，丢弃。
+        // 同 seq 重放：丢弃。
         assert!(!w.fresh(100));
-        // 窗口内新 seq：放行。
+        // 递增流：窗口前移并累积（2026-10-16 修复后的语义）。
         assert!(w.fresh(101));
         assert!(!w.fresh(101));
-        // 注意 ART-Pi 的真实语义（frame_codec.c:132）：只有"回看已见 seq"才丢。
-        // 100 在 101 之后并未入过窗（101 是跳变，重置了窗口），所以此刻的 100
-        // 会被当成新流放行——这正是"重传必须换 seq"的镜像：换 seq 一定送达，
-        // 同 seq 必被吃。
-        assert!(w.fresh(100));
-        // 推进到窗口边缘（16）之外：视为新流，重置。
+        // 100 此刻已入窗（不再是"跳变重置"），重放必被吃——
+        // 这正是修复的核心：递增流下 last-1/last-2 重放拦得住。
+        assert!(!w.fresh(100));
+        // 推进到窗口边缘（16）之外：出窗旧流，重置放行。
         assert!(w.fresh(120));
         // 重置后旧的 seq 又变"新"。
         assert!(w.fresh(100));
+    }
+
+    #[test]
+    fn seq_window_increasing_stream_blocks_replays() {
+        // 回归镜像 ART-Pi host_test/test_frame_codec.c 用例 3：
+        // 修复前（diff>=WINDOW 一律重置）这里 101/100 会被漏放。
+        let mut w = SeqWindow::default();
+        assert!(w.fresh(100));
+        assert!(w.fresh(101));
+        assert!(w.fresh(102));
+        assert!(!w.fresh(101), "last-1 重放必被吃");
+        assert!(!w.fresh(100), "last-2 重放必被吃");
+        assert!(!w.fresh(102), "last 自身重放必被吃");
+        assert!(w.fresh(103), "正常递增继续放行");
+        assert!(!w.fresh(100), "窗口前移后仍在 16 槽内");
+    }
+
+    #[test]
+    fn seq_window_wraparound_65535_to_0() {
+        let mut w = SeqWindow::default();
+        assert!(w.fresh(0xFFFE));
+        assert!(w.fresh(0xFFFF));
+        assert!(w.fresh(0x0000), "回绕点必须无缝");
+        assert!(w.fresh(0x0001));
+        assert!(!w.fresh(0xFFFF), "回绕后重放照拦");
+        assert!(!w.fresh(0x0000));
+        assert!(w.fresh(0x0002));
+    }
+
+    #[test]
+    fn seq_window_peer_restart_tolerated() {
+        let mut w = SeqWindow::default();
+        assert!(w.fresh(500));
+        assert!(w.fresh(2), "对端重启回落到小值：出窗旧流，重置放行（不锁死链路）");
+        assert!(w.fresh(3));
+        assert!(!w.fresh(2), "新流的重放照样拦");
     }
 
     #[test]

@@ -262,7 +262,7 @@ fn spawn_udp_thread(app: AppHandle, rx: Receiver<OutCmd>, peer: SocketAddr) {
                         dirty = true;
                     }
                     LinkEvent::LinkDown => {
-                        log_buffer::warn("链路中断（3s 未收到 ART-Pi 回帧）——命令将进入重传");
+                        log_buffer::warn("链路中断（8s 未收到 ART-Pi 回帧）——已切高频探测");
                         dirty = true;
                     }
                 }

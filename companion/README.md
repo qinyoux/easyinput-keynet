@@ -73,16 +73,37 @@ companion/
 
 ## 已知边界（MVP 裁剪，详见 CHANGELOG）
 
-- 场景在 **Companion 侧展开**成设备命令（ART-Pi `on_scene` 尚为 TODO(M4) 桩）；
-  `scene_mode="remote"` 预留切换。
-- ART-Pi 实板联调待接板验证（协议层已 54/54 单测覆盖）。
+- 场景展开**两路并存且语义一致**：ART-Pi `on_scene` 已从 TODO(M4) 桩落地为
+  `sh_scene.c` 本地展开（8 场景 30 条命令，实测真机 8 场景 31 命令全 Ack），
+  Companion 仍默认 PC 侧展开；`scene_mode="remote"` 预留切换。三端场景表
+  （ART-Pi `sh_scene.c` / Companion `scene.rs` / `artpi_sim.py`）由
+  `tools/scene_parity.py` 程序化校验逐条一致。
 - 无 Wi-Fi 自动发现：ART-Pi IP 需手动配置（默认 192.168.1.10）。
-- 测试基线：`cargo test` 54/54 绿、`cargo build` 0 警告、`npm run build` 通过、
+- 测试基线：`cargo test` 62/62 绿、`cargo build` 0 警告、`npm run build` 通过、
   出包 + 12s 运行时冒烟通过。
 
 ## 版本历史
 
 用户视角摘要（开发者视角见 `CHANGELOG.md`）。
+
+### 0.2.6 — 2026-10-16
+
+用户无感版本：配套 ART-Pi 固件的 seq 去重修复，把 Companion 里的协议镜像
+和回归测试对齐到修复后的行为（PC 侧运行路径零变化，重传本来就一直换 seq）。
+新增 3 条回归测试钉死：递增流下重放必被吃、seq 回绕无缝、板子重启后不锁死。
+
+### 0.2.5 — 2026-10-15
+
+两件用户体验修复：
+
+1. **双击 exe「无法访问」**：你双击的多半是 `target/debug/` 里的开发版，
+   它必须配合 `npm run tauri dev` 才能显示。直接双击请用
+   `src-tauri/target/release/easyinput-companion.exe`——本版已重建，
+   前端资源内嵌，双击即用。
+2. **心跳降噪**：上线后心跳从 800ms 一次降到 5s 一次（串口噪音 -84%），
+   板子串口留给真正的调试输出。启动/断连/命令无应答时自动切回 300ms
+   高频探测，连通稳定后自动放缓——串口干净了，断连感知也不迟钝。
+   代价：断连后界面指示灯最多 8 秒才变灰（原 3 秒）。
 
 ### 0.2.4 — 2026-10-15
 

@@ -3,8 +3,9 @@
 """ART-Pi 模拟器集成测试客户端。
 
 扮演 PC Companion 的 UdpLink：发命令 → 等 Ack → 200ms 未确认则**换新 seq**
-重传（≤3 次）→ 解析 7B 状态条目。覆盖协议集成层用例，其中两条专门钉死
-"最隐蔽的坑"（ART-Pi 16 槽 seq 去重窗口会吃掉同 seq 重传）。
+重传（≤3 次）→ 解析 7B 状态条目。覆盖协议集成层用例，其中一组专门钉死
+"最隐蔽的坑"（ART-Pi 16 槽 seq 去重窗口会吃掉同 seq 重传；2026-10-16
+起另含递增流重放回归 + 旧算法负面实证，与 host_test 同源）。
 
 前置：先运行 `python artpi_sim.py`（另开终端）。
 
@@ -25,8 +26,8 @@ import time
 from artpi_sim import (CMD_HEARTBEAT, CMD_LIGHT_LEVEL, CMD_LIGHT_ONOFF,
                        CMD_QUERY_ALL, CMD_QUERY_STATUS, CMD_SCENE,
                        CMD_THERMO_MODE, CMD_THERMO_TARGET, FT_ACK,
-                       FT_STATUS, FRAME_MAX, STATUS_ENTRY_SIZE, Frame,
-                       SeqWindow, crc16_ccitt)
+                       FT_STATUS, FRAME_MAX, FRAME_SEQ_WINDOW,
+                       STATUS_ENTRY_SIZE, Frame, SeqWindow, crc16_ccitt)
 
 PASS = 0
 FAIL = 0
@@ -145,6 +146,19 @@ class Client:
             return None
         return struct.unpack("<h", ack.payload[3:5])[0]
 
+    def dev_state(self, dev_id: int, timeout: float = 1.0):
+        """同步查询单设备状态（0x20 请求-应答）：(onoff, level, temp_x10)。
+
+        与 temp_now 同一理由：读"命令生效后的值"必须走查询，不能
+        sleep+读帧（状态帧两套节拍会还你旧帧）。
+        """
+        seq = self.send(CMD_QUERY_STATUS, bytes([dev_id]))
+        ack = self.wait_ack(seq, timeout=timeout)
+        if ack is None or len(ack.payload) < STATUS_ENTRY_SIZE:
+            return None
+        p = ack.payload
+        return (p[1], p[2], struct.unpack("<h", p[3:5])[0])
+
     def close(self) -> None:
         self.stop.set()
         self.thread.join(timeout=0.5)
@@ -160,6 +174,38 @@ def parse_states(payload: bytes):
     return out
 
 
+class OldSeqWindow:
+    """修复前的旧算法复刻——**只用于负面测试**，证明新回归用例咬得住。
+
+    对应 frame_codec.c 2026-10-16 前的实现：`diff>=16 一律重置窗口`。
+    递增流下每帧重置、位图永远只剩 1 位 ⇒ last-1 重放恒被放行。
+    """
+
+    def __init__(self) -> None:
+        self.last = 0
+        self.mask = 0
+
+    def fresh(self, seq: int) -> bool:
+        diff = (self.last - seq) & 0xFFFF
+        if diff < FRAME_SEQ_WINDOW:
+            bit = 1 << diff
+            if self.mask & bit:
+                return False
+            self.mask |= bit
+            return True
+        self.last = seq
+        self.mask = 1
+        return True
+
+
+def _incr_stream_replay_eaten(win_cls) -> bool:
+    """递增流 10→11→12→13 后重放 12：修复后必须被吃。"""
+    w = win_cls()
+    for s in (10, 11, 12, 13):
+        w.fresh(s)
+    return w.fresh(12) is False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=17335)
@@ -173,6 +219,33 @@ def main() -> int:
     w = SeqWindow()
     check("seq 窗口: 同 seq 丢弃", (w.fresh(42), w.fresh(42)) == (True, False))
     check("seq 窗口: 换 seq 放行", w.fresh(43))
+
+    # 2026-10-16 seq 去重修复回归（与 host_test/test_frame_codec.c 同源用例，
+    # 固件侧实测背景：丢包重传同 seq 会被二次执行）。旧算法下这些用例**全部
+    # 失败**——文末负面实证钉死这一点，防"静默通过"。
+    w = SeqWindow()
+    for s in (10, 11, 12, 13):
+        w.fresh(s)
+    check("seq 窗口: 递增流重放被吃", w.fresh(12) is False,
+          "旧算法行为：位图被每帧重置，重放被放行")
+    check("seq 窗口: 递增流同 seq 被吃", w.fresh(13) is False)
+    check("seq 窗口: 递增流新 seq 放行", w.fresh(14))
+    w = SeqWindow()
+    w.fresh(65534)
+    w.fresh(65535)
+    check("seq 窗口: 回绕 65535→0 放行", w.fresh(0))
+    check("seq 窗口: 回绕后 65535 重放被吃", w.fresh(65535) is False)
+    w = SeqWindow()
+    w.fresh(100)
+    check("seq 窗口: 大跳变按新流放行", w.fresh(40000))
+    check("seq 窗口: 新流同 seq 被吃", w.fresh(40000) is False)
+    w = SeqWindow()
+    w.fresh(7)
+    w.reset()
+    check("seq 窗口: reset 后同 seq 放行", w.fresh(7))
+    check("负面实证: 旧算法放行递增流重放（证明上面咬得住）",
+          not _incr_stream_replay_eaten(OldSeqWindow),
+          "旧算法也拦住了？回归用例是摆设")
 
     f = Frame(1, CMD_LIGHT_ONOFF, 0x0102, 7, bytes([1, 1]))
     check("帧 roundtrip", Frame.decode(f.encode()) == f)
@@ -245,9 +318,25 @@ def main() -> int:
         ack = c.send_reliable(CMD_HEARTBEAT)
         check("坏 CRC 帧不击垮服务端", ack is not None)
 
-        print("== 场景 0x47（TODO M4 桩） ==")
-        ack = c.send_reliable(CMD_SCENE, bytes([1]))
-        check("0x47 → Ack（但不执行，复刻真源桩）", ack is not None)
+        print("== 场景 0x47（本地展开，2026-10-16 起真实现） ==")
+        # 2026-10-16 前这里是 TODO(M4) 桩用例（只回 Ack 不执行）——
+        # 真源 sh_scene.c 落地后，必须验证「回 Ack **且**设备状态真的变」。
+        # 状态读值走 0x20 同步查询（禁 sleep+读帧，理由见 dev_state 注释）。
+        ack = c.send_reliable(CMD_SCENE, bytes([4]))   # 影院：主灯30% + 插座1开
+        check("0x47 → Ack", ack is not None)
+        st = c.dev_state(1)
+        check("场景「影院」主灯亮度 30%", st is not None and st[1] == 30,
+              f"实际 {st}")
+        st = c.dev_state(5)
+        check("场景「影院」插座1 开", st is not None and st[0] == 1,
+              f"实际 {st}")
+        ack = c.send_reliable(CMD_SCENE, bytes([2]))   # 离家：全关 + 温控关
+        check("0x47 离家 → Ack", ack is not None)
+        st = c.dev_state(1)
+        check("场景「离家」主灯关", st is not None and st[0] == 0,
+              f"实际 {st}")
+        ack = c.send_reliable(CMD_SCENE, bytes([9]))   # 未知场景 id
+        check("0x47 未知 id → 仍回 Ack（复刻真源失败也 Ack）", ack is not None)
 
         print("== 温控仿真 ==")
         # ⚠️ 本用例踩过三个坑，每一个都表现为"报失败但产品代码完全正常"：

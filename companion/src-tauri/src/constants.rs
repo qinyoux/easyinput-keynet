@@ -109,10 +109,29 @@ pub const CMD_GAP_MS: u64 = 150;
 pub const RETRANSMIT_AFTER_MS: u64 = 200;
 /// 关键命令最大重传次数（首送 + 3 次重传 = 最多 4 帧）。
 pub const RETRANSMIT_MAX: u8 = 3;
-/// 心跳发送间隔。ART-Pi 侧 1s 无帧即判失联，发在 800ms 留足余量。
-pub const HEARTBEAT_INTERVAL_MS: u64 = 800;
+
+/// 心跳——**自适应双档**（2026-10-15 钦友要求：串口留给调试，别被心跳刷屏）。
+///
+/// 板子端 `ctrl_server.c` 每收一帧都 `rt_kprintf` 打日志，固定 800ms 心跳 =
+/// 串口每分钟 75 条噪音，真调试信息全被淹没。改为两档：
+///
+/// - **探测档**（[`HEARTBEAT_PROBE_MS`]）：未连通（含启动）或链路可疑
+///   （有命令重传耗尽）时使用。300ms 快速探到板子，比旧 800ms 首连更快。
+/// - **保活档**（[`HEARTBEAT_IDLE_MS`]）：已连通且无异常时使用。5s 一跳，
+///   串口噪音从 75 帧/分降到 12 帧/分。
+///
+/// ⚠️ 三个值必须联动，否则会出现「判死 → 高频探测 → 复活 → 放缓 → 又判死」
+/// 的振荡，比固定 800ms 更吵：
+/// [`HEARTBEAT_IDLE_MS`] + 余量 必须 > [`LINK_DEAD_AFTER_MS`]——保活档下
+/// 单个心跳 Ack 丢失后，PC 要等到下一跳（5s 后）才有回帧，3s 旧阈值会在
+/// 每个保活间隙误判死链。8s = 5s + 一个重传周期余量。
+/// 板子侧「1s 无帧判 PC 失联」只影响板子的在线指示，不影响命令执行
+/// （命令收帧独立处理，真机 8 场景 31 命令全 Ack 已验证）。
+pub const HEARTBEAT_PROBE_MS: u64 = 300;
+pub const HEARTBEAT_IDLE_MS: u64 = 5000;
+
 /// 链路判死：超过该时长未收到任何 ART-Pi 回帧（Ack/状态）即置链路 Down。
-pub const LINK_DEAD_AFTER_MS: u64 = 3000;
+pub const LINK_DEAD_AFTER_MS: u64 = 8000;
 
 /// 保留 UUID 段：家居场景（8 个）。
 ///

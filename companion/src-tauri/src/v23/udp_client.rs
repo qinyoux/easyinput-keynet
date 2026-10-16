@@ -184,6 +184,9 @@ pub struct UdpLink {
     last_rx: Option<Instant>,
     last_hb: Instant,
     link_up: bool,
+    /// 链路可疑：有命令重传耗尽（发帧无应答）。置位后心跳立即回探测档，
+    /// 收到任何回帧即清除。见 `hb_interval` 与 constants 的联动说明。
+    suspect: bool,
 }
 
 impl UdpLink {
@@ -200,6 +203,7 @@ impl UdpLink {
             last_rx: None,
             last_hb: Instant::now(),
             link_up: false,
+            suspect: false,
         })
     }
 
@@ -276,6 +280,8 @@ impl UdpLink {
         match self.socket.recv_from(&mut buf) {
             Ok((n, from)) => {
                 self.last_rx = Some(Instant::now());
+                // 板子有回帧 = 链路可疑解除，心跳回保活档。
+                self.suspect = false;
                 match frame::decode(&buf[..n]) {
                     Ok(f) => self.handle_frame(&f, events),
                     Err(e) => events.push(LinkEvent::Log(format!(
@@ -355,16 +361,32 @@ impl UdpLink {
                         events.push(LinkEvent::Log(format!("重传发送失败: {e}")));
                     }
                 }
-                Due::Failed(p) => events.push(LinkEvent::Failed {
-                    cmd: p.cmd,
-                    label: p.label,
-                }),
+                Due::Failed(p) => {
+                    // 命令重传耗尽 = 板子无应答 ⇒ 链路可疑，心跳立即回
+                    // 探测档高频找板子（钦友要求：无应答再启动高频检测）。
+                    self.suspect = true;
+                    events.push(LinkEvent::Failed {
+                        cmd: p.cmd,
+                        label: p.label,
+                    });
+                }
             }
         }
     }
 
+    /// 心跳档位：未连通（含启动）/链路可疑 → 探测档；稳定连通 → 保活档。
+    ///
+    /// 纯函数便于单测钉死档位规则，`heartbeat` 只消费结果。
+    fn hb_interval(&self) -> Duration {
+        if self.link_up && !self.suspect {
+            Duration::from_millis(HEARTBEAT_IDLE_MS)
+        } else {
+            Duration::from_millis(HEARTBEAT_PROBE_MS)
+        }
+    }
+
     fn heartbeat(&mut self, events: &mut Vec<LinkEvent>) {
-        if self.last_hb.elapsed() < Duration::from_millis(HEARTBEAT_INTERVAL_MS) {
+        if self.last_hb.elapsed() < self.hb_interval() {
             return;
         }
         self.last_hb = Instant::now();
@@ -377,7 +399,8 @@ impl UdpLink {
             payload: vec![],
         }) {
             // 心跳不跟踪重传：Ack 丢失本身即"链路可疑"的信号，
-            // 由 check_alive 的 3s 判死统一处理，避免心跳塞满重传队列。
+            // 由 check_alive 的 LINK_DEAD_AFTER_MS 判死统一处理，
+            // 避免心跳塞满重传队列。
             if let Err(e) = self.socket.send_to(&bytes, self.peer) {
                 events.push(LinkEvent::Log(format!("心跳发送失败: {e}")));
             }
@@ -593,5 +616,89 @@ mod tests {
             link.recv_once(&mut events, Duration::from_millis(20));
         }
         assert!(link.last_rx.is_none(), "无对端时不得更新 last_rx");
+    }
+
+    /// 自适应心跳档位规则（2026-10-15 钦友要求：连通后串口留干净）。
+    ///
+    /// 未连通（含启动）或可疑 → 探测档；稳定连通 → 保活档。
+    #[test]
+    fn heartbeat_interval_two_gears() {
+        let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut link = UdpLink::new(peer).unwrap();
+
+        // 启动未连通 → 探测档（快速找板子）。
+        assert_eq!(
+            link.hb_interval(),
+            Duration::from_millis(HEARTBEAT_PROBE_MS)
+        );
+
+        // 连通 → 保活档（降噪）。
+        link.link_up = true;
+        assert_eq!(link.hb_interval(), Duration::from_millis(HEARTBEAT_IDLE_MS));
+
+        // 命令无应答（可疑）→ 立即回探测档。
+        link.suspect = true;
+        assert_eq!(
+            link.hb_interval(),
+            Duration::from_millis(HEARTBEAT_PROBE_MS)
+        );
+        link.suspect = false;
+
+        // 断连 → 探测档。
+        link.link_up = false;
+        assert_eq!(
+            link.hb_interval(),
+            Duration::from_millis(HEARTBEAT_PROBE_MS)
+        );
+    }
+
+    /// 保活档间隔必须小于判死阈值：否则每个保活间隙（单个 Ack 丢失时最长
+    /// 等到下一跳）都误判死链 → 高频探测 → 复活 → 放缓 → 又判死，振荡
+    /// 比固定 800ms 心跳更吵。
+    #[test]
+    fn idle_heartbeat_must_stay_below_dead_threshold() {
+        assert!(
+            HEARTBEAT_IDLE_MS + RETRANSMIT_AFTER_MS < LINK_DEAD_AFTER_MS,
+            "HEARTBEAT_IDLE_MS({HEARTBEAT_IDLE_MS}) + 重传余量 必须 < LINK_DEAD_AFTER_MS({LINK_DEAD_AFTER_MS})"
+        );
+    }
+
+    /// 命令重传耗尽必须置可疑（心跳切探测档）；随后收到任何回帧即解除。
+    #[test]
+    fn failed_command_sets_suspect_until_any_rx() {
+        let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut link = UdpLink::new(peer).unwrap();
+        link.link_up = true; // 先进保活档
+        link.send_command(CMD_LIGHT_ONOFF, &[1, 1], "主灯开").unwrap();
+        assert_eq!(link.hb_interval(), Duration::from_millis(HEARTBEAT_IDLE_MS));
+
+        // 推进时间越过全部重传窗口（首送 + 3 重传，各 200ms）。
+        // 事件跨轮累积：Failed 产出于第 4 轮，逐轮 clear 会把它洗掉。
+        let mut all_events = Vec::new();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(RETRANSMIT_AFTER_MS + 20));
+            all_events.extend(link.pump(Duration::from_millis(1)));
+        }
+        assert!(
+            all_events
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Failed { .. })),
+            "重传耗尽应产出 Failed 事件：{all_events:?}"
+        );
+        assert!(link.suspect, "Failed 后必须置链路可疑");
+        assert_eq!(
+            link.hb_interval(),
+            Duration::from_millis(HEARTBEAT_PROBE_MS),
+            "无应答后心跳必须立即回探测档"
+        );
+
+        // 收到任何回帧即解除可疑（recv_once 里 `self.suspect = false` 的
+        // 赋值路径；对端不存在没法真收帧，直接驱动同一段状态）。
+        // link_up 需一并恢复：真实运行中 link_up 只在有回帧后为真，
+        // 本测试是手动置真的，已被上面的判死拉回 false。
+        link.suspect = false;
+        link.link_up = true;
+        link.last_rx = Some(Instant::now());
+        assert_eq!(link.hb_interval(), Duration::from_millis(HEARTBEAT_IDLE_MS));
     }
 }

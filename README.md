@@ -60,25 +60,30 @@ cd companion && npm install && npm run tauri dev
 │   ├── src-tauri/src/     #   HID 三件套 / V2.3 帧+UDP / 场景状态机 / 配置存储
 │   └── README.md          #   工程细节（架构图、模块表、测试基线）
 └── artpi-sim/             # ART-Pi V2.3 协议模拟器（无真机联调/演示用，纯标准库）
-    ├── artpi_sim.py       #   服务端：CRC16-CCITT / seq 去重窗口 / Ack / 状态帧
-    └── test_client.py     #   集成测试：18 用例（含"同 seq 重放被吃"复现）
+    ├── artpi_sim.py       #   服务端：CRC16-CCITT / seq 去重窗口 / Ack / 状态帧 / 场景本地展开
+    └── test_client.py     #   集成测试：25 用例（含"同 seq 重放被吃"复现）
 ```
 
 ## 测试证据（过程资产）
 
 | 层 | 内容 | 结果 |
 |----|------|------|
-| Companion 单元 | 帧编解码 / 重传队列 / 场景机 / 配置 sanitize | `cargo test` **54/54 绿** |
-| 协议集成 | Python 客户端 ↔ 模拟器（重传换 seq / 坏帧 / 场景 M4 桩 / 温控仿真） | **18/18 绿** |
-| 端到端 | Companion 真身 ↔ 模拟器（启动查询 + 800ms 心跳 + seq 递增） | ✅ 日志实证 |
+| Companion 单元 | 帧编解码 / 重传队列 / 场景机 / 配置 sanitize / seq 窗口回归 | `cargo test` **62/62 绿** |
+| ART-Pi 帧层主机单测 | `frame_codec.c` seq 窗口全分支（递增前移/重放/回绕/重启容忍）+ 编解码回归 | **79/79 绿**（旧算法 23 处失败，验证测试咬得住） |
+| ART-Pi UI/场景主机单测 | 场景栏几何与命中 + 触摸分发（场景优先于卡片）+ 场景命令序列 + UI 同步链 + 高亮渲染 | **35/35 绿**（断开 wiring 7 处失败、打断命中 11 处失败，负面实证） |
+| ART-Pi 语法自检 | 全量源文件 `-Wall -Wextra -Werror -DSH_SYNTAX_CHECK` | **21 文件 0 错误 0 警告**（桩签名须与 SDK 逐字对照，桩错会给假通过） |
+| 协议集成 | Python 客户端 ↔ 模拟器（重传换 seq / 坏帧 / 场景本地展开 / 温控仿真 / seq 修复回归） | **34/34 绿**（连跑 5 次） |
+| 三端一致性 | `companion/tools/scene_parity.py`：8 场景 30 条命令在 ART-Pi C 表 / Companion Rust 表 / 模拟器 Python 表逐条比对 | ✅ 程序化校验 |
+| 端到端 | Companion 真身 ↔ 模拟器（启动查询 + 心跳 + seq 递增） | ✅ 日志实证 |
 | 真机端到端 | ART-Pi 真机（`10.10.21.29`）：8 场景 31 条命令全 Ack + 3 个 LED（PH3/PB13/PB2）物理点亮，亮灭与指令一致 | ✅ 2026-10-15 实测 |
+| 固件构建 | scons 目标构建（seq 修复 / UI 同步 / 场景模块 / 场景栏 / 临界区签名修正） | ✅ 2026-10-16 `Debug/rtthread.bin` 430060 B，**待烧录验证** |
 | 构建 | `cargo build` 0 警告 / `npm run build` / `tauri build` 出包 | ✅ |
 
 ## 与课程知识点的对应
 
 | 知识点 | 落点 |
 |--------|------|
-| 8 键 × 8 场景 | Companion 场景状态机（编码器切场景），映射全软件定义 |
+| 8 键 × 8 场景 | Companion 场景状态机（编码器切场景），映射全软件定义；ART-Pi 侧 0x47 本地展开同语义落地（`sh_scene.c`） |
 | 量产四前置 | 零固件迭代实证；ART-Pi 侧 `rt_ota_lib` 现成 |
 | 真相源三件套 | 协议契约逐字段对齐 `sh_frame.h` / `host_action_protocol.cpp` 真源 |
 | AI 辅助开发 | 规划→实现→自测全流程 AI 协同；踩坑有记录有测试 |
@@ -86,7 +91,7 @@ cd companion && npm install && npm run tauri dev
 
 ## 已知边界（诚实清单）
 
-- ART-Pi 的 `on_scene`（0x47 本地展开）在真源里是 TODO(M4) 桩，故 Companion 默认在 PC 侧展开场景；`scene_mode="remote"` 已预留切换位
+- 场景展开两路并存且语义一致：ART-Pi 侧 0x47 本地展开已落地（`sh_scene.c`，2026-10-16），Companion 默认仍走 PC 侧展开；`scene_mode="remote"` 已预留切换位，三端场景表由 `scene_parity.py` 程序化锁定
 - 0x16 灯效下行通道固件侧未实板验证，本工程降级为 PC 界面反馈
 - 演示依赖 PC 不休眠（USB HID 链路的结构性取舍，脚本内有 Checklist）
 - 模拟器与真源差异仅限仿真便利（温控一阶趋近 vs PID），协议语义一致

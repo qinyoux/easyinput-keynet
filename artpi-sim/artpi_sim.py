@@ -9,11 +9,14 @@
             CRC16-CCITT(poly 0x1021, init 0xFFFF, MSB-first) 覆盖 9+len 字节
   seq 去重 : 16 槽位图滑动窗口（逐位复刻 sh_frame_seq_fresh）
             —— 窗口内同 seq 直接丢弃（这就是"PC 重传必须换 seq"的根源）
+            —— 2026-10-16 起为修复后语义：递增流正确累积位图，last-1
+               重放必被吃（旧算法对递增流每帧重置窗口，详见 SeqWindow 注释）
   Ack      : cmd/seq/sid 回显；0x20/0x48 的 Ack 载荷 = N×7B 状态条目
   状态帧   : FT_STATUS 周期 5s + 命令变化即时上报（复刻 status_report.c）
-  场景 0x47: ⚠️ 真源 cmd_dispatch.c 的 on_scene 是 TODO(M4) 桩——
-             收帧回 Ack 但不执行。本模拟器如实复刻该行为，
-             因此 Companion 默认 scene_mode="expand"（PC 侧展开）。
+  场景 0x47: 本地展开为设备命令序列（2026-10-16 起：真源 cmd_dispatch.c
+            的 on_scene 已从 TODO(M4) 桩落地为 sh_scene.c 真实现，本模拟器
+            同步复刻）。场景表与 sh_scene.c / Companion scene.rs 三端对齐，
+            一致性由 companion/tools/scene_parity.py 程序化校验。
 
 与真源的差异（仅仿真便利，不影响协议语义）：
   - 温控温度收敛用一阶趋近模拟（真源是迟滞+PID，0.1°C 定点）
@@ -76,9 +79,69 @@ CMD_NAMES = {
     CMD_THERMO_TARGET: "温控目标",
     CMD_THERMO_MODE: "温控模式",
     CMD_SOCKET_ONOFF: "插座开关",
-    CMD_SCENE: "场景(TODO-M4)",
+    CMD_SCENE: "场景(本地展开)",
     CMD_QUERY_ALL: "查询全部",
     CMD_CFG_WRITE: "配置写入",
+}
+
+
+# ---------------------------------------------------------------------------
+# 场景表（与 MyART-PI applications/src/sh_scene.c 逐条对齐；
+# Companion scene.rs::default_scenes() 同源——三端一致性由
+# companion/tools/scene_parity.py 程序化校验，改一端忘另一端会 exit 1）
+# ---------------------------------------------------------------------------
+
+def _tgt(v: int) -> bytes:
+    return struct.pack("<h", v)
+
+
+SCENES = {
+    1: ("Home", "回家", [
+        (CMD_LIGHT_ONOFF, bytes([1, 1])),
+        (CMD_LIGHT_LEVEL, bytes([1, 80])),
+        (CMD_THERMO_TARGET, bytes([4]) + _tgt(240)),
+        (CMD_THERMO_MODE, bytes([4, 3])),
+    ]),
+    2: ("Away", "离家", [
+        (CMD_LIGHT_ONOFF, bytes([1, 0])),
+        (CMD_LIGHT_ONOFF, bytes([2, 0])),
+        (CMD_FAN_ONOFF, bytes([3, 0])),
+        (CMD_SOCKET_ONOFF, bytes([5, 0])),
+        (CMD_SOCKET_ONOFF, bytes([6, 0])),
+        (CMD_THERMO_MODE, bytes([4, 0])),
+    ]),
+    3: ("Sleep", "睡眠", [
+        (CMD_LIGHT_ONOFF, bytes([1, 0])),
+        (CMD_LIGHT_LEVEL, bytes([1, 0])),
+        (CMD_THERMO_TARGET, bytes([4]) + _tgt(260)),
+    ]),
+    4: ("Cine", "影院", [
+        (CMD_LIGHT_LEVEL, bytes([1, 30])),
+        (CMD_SOCKET_ONOFF, bytes([5, 1])),
+    ]),
+    5: ("Read", "阅读", [
+        (CMD_LIGHT_LEVEL, bytes([1, 100])),
+        (CMD_LIGHT_LEVEL, bytes([2, 50])),
+    ]),
+    6: ("AllOn", "全开", [
+        (CMD_LIGHT_ONOFF, bytes([1, 1])),
+        (CMD_LIGHT_LEVEL, bytes([1, 100])),
+        (CMD_LIGHT_ONOFF, bytes([2, 1])),
+        (CMD_LIGHT_LEVEL, bytes([2, 100])),
+    ]),
+    7: ("AllOff", "全关", [
+        (CMD_LIGHT_ONOFF, bytes([1, 0])),
+        (CMD_LIGHT_ONOFF, bytes([2, 0])),
+        (CMD_FAN_ONOFF, bytes([3, 0])),
+        (CMD_SOCKET_ONOFF, bytes([5, 0])),
+        (CMD_SOCKET_ONOFF, bytes([6, 0])),
+    ]),
+    8: ("PreCool", "预冷", [
+        (CMD_THERMO_TARGET, bytes([4]) + _tgt(220)),
+        (CMD_THERMO_MODE, bytes([4, 1])),
+        (CMD_FAN_ONOFF, bytes([3, 1])),
+        (CMD_FAN_LEVEL, bytes([3, 60])),
+    ]),
 }
 
 
@@ -152,22 +215,55 @@ class Frame:
 # ---------------------------------------------------------------------------
 
 class SeqWindow:
+    """16 槽位图滑动窗口，逐位复刻 `sh_frame_seq_fresh`（frame_codec.c）。
+
+    2026-10-16 与真源同步修复后的语义（RFC 1982 回绕差分）：
+    旧算法 `diff>=16 一律"窗口外新流重置"` 对**递增流恒真**——每帧重置、
+    位图永远只剩 1 位，`last-1` 重放拦不住（实测丢包场景下重传同 seq
+    会被二次执行）。修复：`diff>=0x8000` 判为领先，窗口前移
+    （advance=0x10000-diff），递增流正确累积位图。
+    """
+
     def __init__(self) -> None:
         self.last = 0
         self.mask = 0
+        self.inited = False
 
     def fresh(self, seq: int) -> bool:
+        if not self.inited:
+            # 首帧任意 seq 均放行（否则首帧 seq=0 会被 diff==0 误杀）
+            self.inited = True
+            self.last = seq
+            self.mask = 1
+            return True
         diff = (self.last - seq) & 0xFFFF
+        if diff == 0:
+            return False                     # 与最新帧同 seq：重放
         if diff < FRAME_SEQ_WINDOW:
             bit = 1 << diff
             if self.mask & bit:
-                return False
+                return False                 # 窗口内已见：重放/乱序重传
             self.mask |= bit
             return True
-        # 窗口外：视为新流（首次或跳变），重置窗口
+        if diff < 0x8000:
+            # 落后 16..32767：窗口外旧流（对端重启/换流），重置窗口
+            self.last = seq
+            self.mask = 1
+            return True
+        # diff >= 0x8000：seq 领先 seq_last（正常递增流），窗口前移
+        advance = 0x10000 - diff             # 取值 1..32767
+        if advance >= FRAME_SEQ_WINDOW:
+            self.mask = 1                    # 整窗跳出，只留最新一槽
+        else:
+            self.mask = ((self.mask << advance) | 1) & 0xFFFF
         self.last = seq
-        self.mask = 1
         return True
+
+    def reset(self) -> None:
+        """复刻 sh_frame_seq_reset：对端重启/换流时由服务端调用。"""
+        self.inited = False
+        self.mask = 0
+        self.last = 0
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +401,25 @@ class ArtPiSim:
             out.append(self.ack(f, b""))
 
         elif f.cmd == CMD_SCENE:
-            # ⚠️ 复刻真源：cmd_dispatch.c 的 on_scene 是 TODO(M4) 桩——
-            # 收帧回 Ack 但不执行任何设备动作。Companion 因此默认在 PC 侧
-            # 把场景展开成 0x40–0x46 设备命令（scene_mode="expand"）。
+            # 复刻真源（2026-10-16）：on_scene 已落地为 sh_scene.c 本地展开——
+            # 合成命令帧走 cmd_dispatch 真 handler。展开的每条命令不回逐条
+            # Ack（只回顶层 0x47 Ack）；真源每条成功后 status_report_push
+            # 即时上报，模拟器统一 dirty 一次触发同效行为。
+            # 部分失败继续执行（与 sh_scene_execute 的聚合语义一致）。
             scene = f.payload[0] if f.payload else 0
-            log(f"⚠ 场景 0x47 id={scene} → TODO(M4) 桩：回 Ack 不执行"
-                f"（seq={f.seq}）")
-            out.append(self.ack(f, b""))
+            if scene not in SCENES:
+                log(f"✗ 场景 id={scene} 不存在（合法 1-8）→ 回 Ack"
+                    f"（seq={f.seq}）")
+                out.append(self.ack(f, b""))
+            else:
+                tag, name, cmds = SCENES[scene]
+                failed = sum(
+                    0 if self._apply_device_cmd(c, p) else 1 for c, p in cmds)
+                self.dirty = True
+                note = "" if failed == 0 else f"（{failed} 条失败）"
+                log(f"⚙ 场景「{name}」({tag}) 展开 {len(cmds)} 条命令{note}"
+                    f"（seq={f.seq}）")
+                out.append(self.ack(f, b""))
 
         elif f.cmd == CMD_CFG_WRITE:
             log(f"← 配置写入 {len(f.payload)}B（seq={f.seq}）")
@@ -364,6 +472,44 @@ class ArtPiSim:
     def _dev_from_payload(self, payload: bytes, idx: int) -> int | None:
         return payload[idx] if len(payload) > idx else None
 
+    def _apply_device_cmd(self, cmd: int, payload: bytes) -> bool:
+        """执行一条设备命令（场景 0x47 本地展开用，不回 Ack 不打日志）。
+
+        与 handle() 里 0x40–0x46 分支同逻辑同约束，返回 False 表示
+        载荷不足/设备不存在（对应真源 SH_ERR_NO_DEV / SH_ERR_RANGE）。
+        """
+        if cmd in (CMD_LIGHT_ONOFF, CMD_LIGHT_LEVEL, CMD_FAN_ONOFF,
+                   CMD_FAN_LEVEL, CMD_SOCKET_ONOFF):
+            if len(payload) < 2:
+                return False
+            dev, val = payload[0], payload[1]
+            if dev not in self.devices:
+                return False
+            d = self.devices[dev]
+            if cmd in (CMD_LIGHT_ONOFF, CMD_FAN_ONOFF, CMD_SOCKET_ONOFF):
+                d.onoff = val
+            else:
+                d.level = min(val, 100)
+            return True
+        if cmd == CMD_THERMO_TARGET:
+            if len(payload) < 3:
+                return False
+            zone = payload[0]
+            if zone not in self.devices:
+                return False
+            self.devices[zone].thermo_target_x10 = struct.unpack(
+                "<h", payload[1:3])[0]
+            return True
+        if cmd == CMD_THERMO_MODE:
+            if len(payload) < 2:
+                return False
+            zone, mode = payload[0], payload[1]
+            if zone not in self.devices:
+                return False
+            self.devices[zone].thermo_mode = mode
+            return True
+        return False
+
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -406,7 +552,8 @@ def serve(port: int, room_temp_x10: int) -> None:
     log("ART-Pi V2.3 协议模拟器（复刻 ctrl_server/frame_codec 行为）")
     log(f"监听 0.0.0.0:{port} · 室温 {room_temp_x10 / 10:.1f}℃ · "
         f"状态周期 {sim.status_period:.0f}s")
-    log("场景 0x47 = TODO(M4) 桩（与真源一致）：Companion 须用 expand 模式")
+    log("场景 0x47 = 本地展开（sh_scene.c 真实现，2026-10-16 起；三端一致性 "
+        "由 companion/tools/scene_parity.py 校验）")
     log("=" * 62)
 
     last_tick = time.monotonic()

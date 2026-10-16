@@ -3,6 +3,62 @@
 > 开发者视角。用户视角摘要见 README「版本历史」。
 > 版本号真源：`package.json`；`Cargo.toml` / `tauri.conf.json` 由 `npm run version:sync` 同步。
 
+## [0.2.6] - 2026-10-16
+
+### 修复
+- **`SeqWindow` 镜像对齐 ART-Pi seq 去重修复**（测试专用代码，PC 运行路径
+  零变化——PC 侧不做去重，重传始终换 seq）：ART-Pi `frame_codec.c` 旧算法把
+  `diff >= WINDOW` 一律当"新流重置"，递增流每帧重置、位图永远只剩 1 位，
+  last-1 重放拦不住。现按回绕差分符号分流（领先前移 / 出窗重置 / 同 seq 拒），
+  `SeqWindow` 逐位复刻修复后的语义。
+- `seq_window_matches_art_pi_semantics` 旧断言钉的正是 bug 行为
+  （"101 之后的 100 会被放行"），已改为"必被吃"。
+
+### 新增
+- 3 条 seq 窗口回归测试（镜像 ART-Pi host_test 用例）：递增流重放全拦、
+  65535→0 回绕无缝、对端重启回落小值不锁死。cargo test 59 → 62。
+- **`artpi_sim.py` 的 `SeqWindow` 同步为修复后语义**（此前仍是旧算法，
+  模拟器自称「逐位复刻 `sh_frame_seq_fresh`」却与修复后的真机漂移）；
+  新增 `reset()` 对齐 `sh_frame_seq_reset()`。测试 25 → 34 用例：
+  递增流重放/回绕/大跳变/reset 四组回归 + **旧算法负面实证**
+  （把旧算法复刻进测试文件，证明新用例咬得住 bug）。
+- 模拟器场景 0x47 与 ART-Pi `sh_scene.c` 语义同步为真实现（此前为 TODO(M4)
+  桩：回 Ack 不执行），8 场景 30 条命令三端一致，由
+  `tools/scene_parity.py` 程序化校验。
+
+### 文档
+- `companion/README.md` 已知边界：场景「Companion 侧展开 + ART-Pi 桩」改写为
+  「两路并存且语义一致」，测试基线 54/54 → 62/62。
+- `artpi-sim/README.md`：复刻表与用例数（18 → 34）同步。
+
+## [0.2.5] - 2026-10-15
+
+### 新增
+- **自适应心跳（双档）**：钦友反馈固定 800ms 心跳把 ART-Pi 串口刷满
+  （每帧 `rt_kprintf`，75 条噪音/分钟），调试信息全被淹没。改为：
+  - **探测档 300ms**：未连通（含启动）或链路可疑时，快速找板子；
+  - **保活档 5000ms**：连通且无异常时，串口噪音降到 12 帧/分钟（-84%）；
+  - **无应答即升档**：任何命令重传耗尽（`Due::Failed`）置 `suspect`，
+    心跳立即回探测档；收到任何回帧即解除。
+- 3 条单测钉死档位规则：双档切换矩阵、`HEARTBEAT_IDLE_MS + 重传余量 <
+  LINK_DEAD_AFTER_MS` 联动校验（防「判死→探测→复活→放缓→又判死」振荡）、
+  Failed 置可疑/回帧解除的生命周期。
+
+### 变更
+- `LINK_DEAD_AFTER_MS` 3000 → 8000：**必须与心跳档联动**。保活档下单个
+  Ack 丢失要等到下一跳（5s 后）才有回帧，旧 3s 阈值会在每个保活间隙误判
+  死链造成振荡。代价：断连后 UI 最多 8s 才显示离线（此前 3s）。
+- 板子侧「1s 无帧判 PC 失联」只影响板子在线指示，不影响命令执行
+  （命令收帧独立处理，真机 8 场景 31 命令全 Ack 已验证）。
+
+### 修复
+- **双击 exe「无法访问」**：根因是双击了 `target/debug/` 下的 dev 产物——
+  它加载 `http://localhost:1420`（vite 开发服务器），不开 `npm run tauri dev`
+  必然无法访问。正确用法二选一：
+  ① 开发调试：`cd companion && npm run tauri dev`；
+  ② 直接双击：用 `target/release/easyinput-companion.exe`（0.2.5 起重建，
+     前端资源已内嵌，双击即用，无需任何服务器）。
+
 ## [0.2.4] - 2026-10-15
 
 ### 修复
